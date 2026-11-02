@@ -12,7 +12,7 @@ Nobody has to send the "hey, you still owe me for the Airbnb" text again.
 
 ## Try it
 
-**Hosted demo:** _add your Render URL here_
+**Hosted demo:** [square-gink.onrender.com](https://square-gink.onrender.com)
 
 **Run locally (2 minutes, no keys needed):**
 
