@@ -1,0 +1,37 @@
+services:
+  - type: web
+    name: square-agents
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      - key: PAYPAL_MERCHANT_EMAIL
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: ALEX_SANDBOX_EMAIL
+        sync: false
+      - key: MAYA_SANDBOX_EMAIL
+        sync: false
+      - key: ALEX_VAULT_TOKEN
+        sync: false
+      - key: ALEX_PAYER_ID
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SQUARE_ACCESS_CODE
+        sync: false
+      - key: SQUARE_SIGNING_SECRET
+        generateValue: true

@@ -1,0 +1,16 @@
+node_modules
+.next
+.env
+.env.local
+data/db.json
+*.tsbuildinfo
+next-env.d.ts
+data/test-db.json
+data/live-test-db.json
+data/live-check.md
+
+# Local review copies
+review/
+review-updated/
+review-latest/
+review-final/
