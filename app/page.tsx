@@ -218,8 +218,9 @@ export default function Home() {
           <span className={`chip ${state.modes.paypal === "live" ? "live" : ""}`}>
             <span className="dot" />{state.modes.paypal === "live" ? "PayPal sandbox connected" : "PayPal demo mode"}
           </span>
-          <span className={`chip ${state.modes.ai === "claude" ? "live" : ""}`}>
-            <span className="dot" />{state.modes.ai === "claude" ? "Agents run on Claude" : "Agents run on built-in rules"}
+          <span className={`chip ${state.modes.ai !== "demo" ? "live" : ""}`}>
+            <span className="dot" />
+            {state.modes.ai === "claude" ? "Agents run on Claude" : state.modes.ai === "openai" ? "Agents run on OpenAI" : "Agents run on built-in rules"}
           </span>
           <button className="ghost" onClick={reset} disabled={busy}>Reset the trip</button>
         </div>

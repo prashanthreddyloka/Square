@@ -1,19 +1,19 @@
 /**
- * Live integration check: real PayPal sandbox + real Claude.
+ * Live integration check: real PayPal sandbox + a real AI model (Claude or OpenAI).
  *   npm run test:live
  *
  * Needs in .env: PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, ANTHROPIC_API_KEY,
  * ALEX_VAULT_TOKEN (+ ALEX_PAYER_ID) from connecting Alex once in the app, and MAYA_SANDBOX_EMAIL.
  *
  * It runs two negotiations on the Lisbon trip:
- *   1. Default rules: Claude agents negotiate and Square really charges and pays out in the sandbox.
+ *   1. Default rules: AI agents negotiate and Square really charges and pays out in the sandbox.
  *   2. Maya's rules changed to "split everything, drinks included": the agents negotiate again,
  *      and the outcome should change. This run stops at approval, so nothing is charged twice.
  * It writes a summary to data/live-check.md you can quote or screenshot.
  */
 import fs from "node:fs";
 import { decide, negotiate } from "../lib/agents";
-import { aiMode } from "../lib/ai";
+import { aiLabel, aiMode } from "../lib/ai";
 import { accessToken, paypalMode } from "../lib/paypal";
 import { getDB, mutate, resetDB } from "../lib/store";
 import type { Negotiation } from "../lib/types";
@@ -35,7 +35,7 @@ const describe = (n: Negotiation) =>
 
 async function main() {
   need(paypalMode() === "live", "PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET are not set.");
-  need(aiMode() === "claude", "ANTHROPIC_API_KEY is not set.");
+  need(aiMode() !== "demo", "Neither ANTHROPIC_API_KEY nor OPENAI_API_KEY is set.");
   need(process.env.ALEX_VAULT_TOKEN, "ALEX_VAULT_TOKEN is not set. Connect Alex's PayPal in the app once and copy it from the server log.");
   need(process.env.MAYA_SANDBOX_EMAIL, "MAYA_SANDBOX_EMAIL is not set.");
   await accessToken();
@@ -44,7 +44,7 @@ async function main() {
   // Run 1: default rules, real settlement.
   resetDB(false);
   mutate((d) => (d.users.alex.policy.autoApproveMax = 500));
-  console.log("\nRun 1: default rules (Claude negotiates, PayPal settles)");
+  console.log("\nRun 1: default rules (AI agents negotiate, PayPal settles)");
   let first = await negotiate();
   if (first.status === "awaiting_approval") first = await decide(first.id, "approved");
   console.log(describe(first));
@@ -68,7 +68,7 @@ async function main() {
   const changed = second.agreedAmount !== first.agreedAmount;
   const report = `# Square live check (${new Date().toISOString()})
 
-PayPal sandbox and Claude (${process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5"}).
+PayPal sandbox and ${aiLabel()} (${aiMode() === "claude" ? process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5" : process.env.OPENAI_MODEL || "gpt-5-mini"}).
 
 ## Run 1: default rules, settled on PayPal
 ${describe(first)}

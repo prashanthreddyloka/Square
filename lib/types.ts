@@ -157,7 +157,7 @@ export interface Negotiation {
   approval?: { userId: UserId; reason: string; decidedAt?: string; decision?: "approved" | "declined" };
   payment?: PaymentProgress;
   settlement?: Settlement;
-  aiMode: "claude" | "demo";
+  aiMode: "claude" | "openai" | "demo";
 }
 
 export interface DB {

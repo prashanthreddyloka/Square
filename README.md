@@ -22,7 +22,7 @@ npm install
 npm run dev        # open http://localhost:3000
 ```
 
-With no credentials, Square runs in **demo mode**: the full flow works and PayPal and Claude responses are simulated. The header shows which mode each side is in. Add keys (below) to run against the real PayPal sandbox and Claude.
+With no credentials, Square runs in **demo mode**: the full flow works and PayPal and AI responses are simulated. The header shows which mode each side is in. Add keys (below) to run against the real PayPal sandbox and Claude.
 
 ### The 60-second walkthrough
 
@@ -41,7 +41,7 @@ With no credentials, Square runs in **demo mode**: the full flow works and PayPa
 
 Presenting live or recording? Open `/?present=1`: the tape then advances one message per press of the → key.
 
-Tip: with Claude enabled, edit either person's rules or memory in the **Rules** tab and watch the agents negotiate differently. For example, set Maya's rule to "split everything 50/50, drinks included" and the wine dispute is declined. (Built-in rules mode only follows the default rules.)
+Tip: with an AI model enabled, edit either person's rules or memory in the **Rules** tab and watch the agents negotiate differently. For example, set Maya's rule to "split everything 50/50, drinks included" and the wine dispute is declined. (Built-in rules mode only follows the default rules.)
 
 ---
 
@@ -52,7 +52,7 @@ Tip: with Claude enabled, edit either person's rules or memory in the **Rules** 
 | **Vault v3: setup tokens + payment tokens** (save without purchase) | Each human approves an "agent allowance" once. The resulting payment token is what lets their agent pay later without them present. PayPal returns the payer ID with it, which Square puts (masked) on the agent's credential. |
 | **Orders v2 with `vault_id`** | The debtor's agent charges its human's allowance for exactly the agreed amount. |
 | **Payouts v1** | Square forwards the money to the friend's PayPal account. |
-| **PayPal Agent Toolkit** (`@paypal/agent-toolkit`) | Exposed to Claude as tools. The creditor's agent calls `get_order` itself to verify the payment instead of trusting the other agent. When the friend has no allowance, the agent uses `create_invoice` and `send_invoice` to send an itemized PayPal invoice. |
+| **PayPal Agent Toolkit** (`@paypal/agent-toolkit`) | Exposed to the AI model as tools. The creditor's agent calls `get_order` itself to verify the payment instead of trusting the other agent. When the friend has no allowance, the agent uses `create_invoice` and `send_invoice` to send an itemized PayPal invoice. |
 | **Invoicing v2** (through the toolkit) | Fallback settlement path, itemized line by line with the agreed adjustments. |
 | **Webhooks** (`/api/webhooks/paypal`) | Signature-verified payout and invoice events finish settlements that were waiting on PayPal. Unverified events are logged and ignored. |
 
@@ -60,15 +60,15 @@ All in the free PayPal **sandbox**.
 
 ## How it uses AI
 
-Agents are powered by **Claude** (Anthropic Messages API, `claude-sonnet-5-5` by default):
+Agents are powered by **OpenAI** (Chat Completions, `gpt-5-mini` by default) or **Claude** (Anthropic Messages API, `claude-sonnet-5-5`). Square uses whichever key you set: `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` (Claude wins if both are set). Override the model with `OPENAI_MODEL` or `ANTHROPIC_MODEL`.
 
-- **Expense capture:** "Maya paid $40 for the museum" or a **receipt photo** (Claude vision) becomes itemized ledger lines, each tagged as consumable or a shared booking, so lines can be disputed individually.
+- **Expense capture:** "Maya paid $40 for the museum" or a **receipt photo** (read by the model's vision) becomes itemized ledger lines, each tagged as consumable or a shared booking, so lines can be disputed individually.
 - **Negotiation:** each agent gets a persona built from its own human's instructions and memory. The debtor's agent reviews the statement line by line and raises disputes with reasons. The creditor's agent rules on each one under its human's rules. Both write their own messages.
 - **Verification with tools:** the creditor's agent runs a tool-use loop over PayPal Agent Toolkit tools to look up the order and report what it found. Whether the payment counts as verified is decided in code (status, capture and amount), not by the model.
 
 **What the model is not allowed to do:** compute money or decide whether money moves. Amounts are recomputed deterministically from the ledger and the accepted disputes (`lib/ledger.ts`). Spending limits and weekly caps are enforced in code (`lib/agents.ts`), not in the prompt. A prompt-injected agent can argue, but it can't overspend.
 
-Without an `ANTHROPIC_API_KEY`, the same protocol runs on built-in rules so the demo always works.
+Without an AI key, the same protocol runs on built-in rules so the demo always works.
 
 ## Trust, by design
 
@@ -103,7 +103,7 @@ app/
   page.tsx                  two phones + the agent channel
   components/               Phone (chat, ledger, rules, approval), Channel (receipt tape)
   api/
-    expenses                text or receipt photo -> ledger lines (Claude)
+    expenses                text or receipt photo -> ledger lines (AI model)
     negotiate               run the agent-to-agent protocol
     approve                 human approves or declines
     retry                   resume a settlement that didn't finish
@@ -115,13 +115,13 @@ lib/
   agents.ts                 protocol: handshake, statement, dispute, ruling, agreement, guardrails, settle, confirm
   ledger.ts                 deterministic money math
   paypal.ts                 Vault, Orders, Payouts, webhook verification (+ demo mode)
-  toolkit.ts                PayPal Agent Toolkit bridge to Claude tools
-  ai.ts                     Claude client, JSON + tool-use loop
+  toolkit.ts                PayPal Agent Toolkit bridge to model tools
+  ai.ts                     OpenAI and Claude clients, JSON + tool-use loop
   trust.ts                  agent credentials, message signatures, receipts
   view.ts                   sanitized client view of the state
 middleware.ts               access code and same-origin checks
 scripts/e2e.ts              settlement logic tests (demo mode)
-scripts/live-check.ts       live check against the PayPal sandbox and Claude
+scripts/live-check.ts       live check against the PayPal sandbox and the AI model
 ```
 
 State lives in `data/db.json` (a single file, fine for a demo; swap for a database in production). On the hosted demo everyone shares one trip, so press **Reset the trip** if someone else left it mid-way.
@@ -132,7 +132,7 @@ Money flow in sandbox: the debtor's allowance is charged to the app's sandbox **
 
 1. At [developer.paypal.com](https://developer.paypal.com), create a sandbox app. Under its features, make sure **Vault** and **Payouts** are enabled.
 2. Under **Sandbox accounts**, note two personal accounts (one for Alex, one for Maya). You'll log in as Alex's account when you click **Connect PayPal**.
-3. Copy `.env.example` to `.env` and fill in `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `ALEX_SANDBOX_EMAIL`, `MAYA_SANDBOX_EMAIL`, and optionally `ANTHROPIC_API_KEY`.
+3. Copy `.env.example` to `.env` and fill in `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `ALEX_SANDBOX_EMAIL`, `MAYA_SANDBOX_EMAIL`, and optionally `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`).
 4. Optional: add a webhook pointing at `https://<your-host>/api/webhooks/paypal` and put its ID in `PAYPAL_WEBHOOK_ID`.
 5. `npm run dev`.
 
@@ -144,16 +144,16 @@ Step-by-step instructions for Render (including how to keep Alex's PayPal allowa
 
 ```bash
 npm test          # demo mode, no keys needed
-npm run test:live # real PayPal sandbox + Claude
+npm run test:live # real PayPal sandbox + AI model
 ```
 
 `npm test` runs the settlement logic with simulated PayPal responses: the $253 to $241 negotiation, escalation, double-tapped approval (one charge), a failed payout (trip stays open; retry pays out without charging again), a pending payout (no duplicate payout; settles once PayPal confirms), a status lookup failing right after a payout (recovered without paying twice), two simultaneous settle-ups (one refused, one charge), an expense added while approval is pending (stays open), invoice hold until paid, and that no API response contains payment tokens.
 
-`npm run test:live` needs the keys in `.env` plus `ALEX_VAULT_TOKEN` (see [DEPLOY.md](DEPLOY.md)). It runs a real Claude negotiation and settles it in the PayPal sandbox, then changes Maya's rules to "split everything" and negotiates again to show the outcome changes (the second run stops at approval, so nothing is charged twice). It writes a summary to `data/live-check.md`.
+`npm run test:live` needs the keys in `.env` plus `ALEX_VAULT_TOKEN` (see [DEPLOY.md](DEPLOY.md)). It runs a real AI negotiation and settles it in the PayPal sandbox, then changes Maya's rules to "split everything" and negotiates again to show the outcome changes (the second run stops at approval, so nothing is charged twice). It writes a summary to `data/live-check.md`.
 
 ## Built with
 
-Next.js 15, TypeScript, Claude (Anthropic API), PayPal REST APIs (Vault v3, Orders v2, Payouts, Invoicing, Webhooks), PayPal Agent Toolkit.
+Next.js 15, TypeScript, OpenAI or Claude, PayPal REST APIs (Vault v3, Orders v2, Payouts, Invoicing, Webhooks), PayPal Agent Toolkit.
 
 ## License
 

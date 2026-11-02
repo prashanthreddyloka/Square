@@ -23,7 +23,7 @@ Never commit `.env`; it's already in `.gitignore`.
 
 - **PayPal sandbox app:** developer.paypal.com, then Apps & Credentials, Sandbox, Create App. Copy the Client ID and Secret. In the app's features, make sure **Vault** and **Payouts** are on.
 - **Sandbox accounts:** developer.paypal.com, then Testing Tools, Sandbox Accounts. Note one personal account for Alex and one for Maya (email + password; you'll need Alex's to log in once).
-- **Anthropic API key:** console.anthropic.com.
+- **AI key:** an OpenAI key from platform.openai.com (or an Anthropic key from console.anthropic.com).
 
 ## 3. Create the service on Render
 
@@ -33,7 +33,7 @@ Never commit `.env`; it's already in `.gitignore`.
    | Variable | Value |
    |---|---|
    | `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` | from your sandbox app |
-   | `ANTHROPIC_API_KEY` | your Anthropic key |
+   | `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) | your OpenAI key (or Anthropic key) |
    | `ALEX_SANDBOX_EMAIL`, `MAYA_SANDBOX_EMAIL` | the two sandbox personal accounts |
    | `PAYPAL_MERCHANT_EMAIL` | your sandbox business account email (optional) |
    | `SQUARE_ACCESS_CODE` | a code you'll share only with people who should use the demo |
@@ -45,7 +45,7 @@ Never commit `.env`; it's already in `.gitignore`.
 
 ## 4. Connect Alex's PayPal once, then pin it
 
-1. Open your URL and enter your access code. The header should say **PayPal sandbox connected** and **Agents run on Claude**.
+1. Open your URL and enter your access code. The header should say **PayPal sandbox connected** and **Agents run on OpenAI** (or Claude).
 2. On Alex's phone: **Rules > Connect PayPal**, log in with Alex's sandbox account, approve.
 3. In Render, open the service's **Logs**. You'll see a line like `[square] alex PayPal allowance approved: ALEX_VAULT_TOKEN=... ALEX_PAYER_ID=...`. (These identifiers are never sent to the browser.)
 4. Put those two values in `ALEX_VAULT_TOKEN` and `ALEX_PAYER_ID` on Render and save.
@@ -60,7 +60,7 @@ In your sandbox app, add a webhook to `https://<your-url>/api/webhooks/paypal` f
 
 Open the URL in a private window, enter the code, and run: **Reset the trip > Let our agents settle up > Approve and pay**. Then log into sandbox.paypal.com as Maya and confirm the $241 arrived.
 
-Locally, `npm run test:live` does the same against the sandbox and Claude, plus a run with Maya's rules changed, and writes `data/live-check.md`.
+Locally, `npm run test:live` does the same against the sandbox and the AI model, plus a run with Maya's rules changed, and writes `data/live-check.md`.
 
 ## Things to know
 

@@ -1,7 +1,7 @@
 /**
  * PayPal Agent Toolkit bridge.
  *
- * Square agents call PayPal through the official Agent Toolkit, exposed to Claude
+ * Square agents call PayPal through the official Agent Toolkit, exposed to the model
  * as tools. The creditor's agent uses it to independently verify that money really
  * arrived before it signs off, and to send an itemized PayPal invoice when the
  * friend has no agent yet.

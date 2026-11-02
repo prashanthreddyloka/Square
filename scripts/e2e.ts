@@ -1,7 +1,7 @@
 /**
  * End-to-end checks of the settlement logic in demo mode (simulated PayPal and rule-based agents).
  *   npm test
- * For the real PayPal sandbox and Claude, run `npm run test:live` instead.
+ * For the real PayPal sandbox and an AI model, run `npm run test:live` instead.
  */
 import { captureExpense, decide, negotiate, onInvoicePaid, retrySettlement, Conflict } from "../lib/agents";
 import { createPaymentToken, createSetupToken, demoHooks, paypalMode } from "../lib/paypal";
