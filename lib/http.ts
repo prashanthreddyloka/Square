@@ -11,4 +11,6 @@ export function baseUrl(req: Request) {
   return `${proto}://${host}`;
 }
 
-export const isUser = (u: unknown): u is "alex" | "maya" => u === "alex" || u === "maya";
+import { getDB } from "./store";
+
+export const isUser = (u: unknown): u is string => typeof u === "string" && Object.prototype.hasOwnProperty.call(getDB().users, u);

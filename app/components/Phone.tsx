@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { money, other } from "../../lib/ledger";
+import { money } from "../../lib/ledger";
 import type { UserId } from "../../lib/types";
 import type { AppState, ChatLine, PublicNegotiation } from "./types";
 
@@ -9,19 +9,22 @@ type Tab = "chat" | "ledger" | "rules";
 
 export function Phone(props: {
   me: UserId;
+  friend: UserId;
   state: AppState;
   chat: ChatLine[];
   pending: PublicNegotiation | null;
   busy: boolean;
   onSend: (text: string, image?: string) => Promise<void>;
   onDecide: (n: PublicNegotiation, d: "approved" | "declined") => Promise<void>;
+  onCheckout: (n: PublicNegotiation) => Promise<void>;
   onConnect: () => Promise<void>;
   onSavePolicy: (p: { autoApproveMax: number; weeklyCap: number; instructions: string; memory: string[] }) => Promise<void>;
 }) {
   const { me, state } = props;
   const user = state.users[me];
-  const friend = state.users[other(me)];
-  const bal = state.balances[me];
+  const friend = state.users[props.friend];
+  const p = pairOf(state, me, props.friend);
+  const direction = p.total > 0 ? (p.debtor === me ? "owe" : "owed") : p.invoiced > 0 ? "invoiced" : "even";
   const [tab, setTab] = useState<Tab>("chat");
 
   return (
@@ -39,15 +42,15 @@ export function Phone(props: {
         </header>
         <div className="balance">
           <div className="lbl">
-            {bal.direction === "even"
+            {direction === "even"
               ? `You and ${friend.name} are`
-              : bal.direction === "invoiced"
-                ? `${bal.label}, waiting on PayPal`
-                : bal.direction === "owe"
+              : direction === "invoiced"
+                ? `On a PayPal invoice, waiting on PayPal`
+                : direction === "owe"
                   ? `You owe ${friend.name}`
                   : `${friend.name} owes you`}
           </div>
-          <div className={`amt ${bal.direction}`}>{bal.direction === "even" ? "All square" : money(bal.amount)}</div>
+          <div className={`amt ${direction}`}>{direction === "even" ? "All square" : money(direction === "invoiced" ? p.invoiced : p.total)}</div>
         </div>
         <nav className="tabs" role="tablist">
           {(["chat", "ledger", "rules"] as Tab[]).map((t) => (
@@ -57,19 +60,19 @@ export function Phone(props: {
           ))}
         </nav>
         {tab === "chat" && <ChatTab {...props} />}
-        {tab === "ledger" && <LedgerTab me={me} state={state} />}
+        {tab === "ledger" && <LedgerTab me={me} friend={props.friend} state={state} />}
         {tab === "rules" && <RulesTab {...props} />}
       </div>
     </section>
   );
 }
 
-function ChatTab({ me, state, chat, pending, busy, onSend, onDecide }: Parameters<typeof Phone>[0]) {
+function ChatTab({ me, friend: friendId, state, chat, pending, busy, onSend, onDecide, onCheckout }: Parameters<typeof Phone>[0]) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const friend = state.users[other(me)];
+  const friend = state.users[friendId];
   const awaitingMe = pending && pending.approval?.userId === me;
 
   useEffect(() => {
@@ -96,7 +99,9 @@ function ChatTab({ me, state, chat, pending, busy, onSend, onDecide }: Parameter
 
   const hints = me === "alex"
     ? [`I paid $18 for coffee and pastries`, `${friend.name} paid $40 for the museum`]
-    : [`I paid $30 for tapas`, `I paid $22 for the train to Sintra`];
+    : me === "maya" && friendId === "alex"
+      ? [`I paid $30 for tapas`, `I paid $22 for the train to Sintra`]
+      : [`I paid $24 for coffee with ${friend.name}`, `I paid $60 for dinner for everyone`];
 
   return (
     <>
@@ -107,7 +112,7 @@ function ChatTab({ me, state, chat, pending, busy, onSend, onDecide }: Parameter
             {c.text}
           </div>
         ))}
-        {awaitingMe && pending && <ApprovalCard n={pending} me={me} state={state} busy={busy} onDecide={onDecide} />}
+        {awaitingMe && pending && <ApprovalCard n={pending} me={me} state={state} busy={busy} onDecide={onDecide} onCheckout={onCheckout} />}
         {chat.length <= 1 && (
           <div className="hints" aria-label="Try saying">
             {hints.map((h) => (
@@ -130,8 +135,9 @@ function ChatTab({ me, state, chat, pending, busy, onSend, onDecide }: Parameter
   );
 }
 
-function ApprovalCard({ n, me, state, busy, onDecide }: { n: PublicNegotiation; me: UserId; state: AppState; busy: boolean; onDecide: (n: PublicNegotiation, d: "approved" | "declined") => Promise<void> }) {
-  const friend = state.users[other(me)];
+function ApprovalCard({ n, state, busy, onDecide, onCheckout }: { n: PublicNegotiation; me: UserId; state: AppState; busy: boolean; onDecide: (n: PublicNegotiation, d: "approved" | "declined") => Promise<void>; onCheckout: (n: PublicNegotiation) => Promise<void> }) {
+  const friend = state.users[n.creditor];
+  const checkout = n.approval?.mode === "checkout";
   return (
     <div className="approve" role="group" aria-label="Payment waiting for your approval">
       <h3>Send {money(n.agreedAmount)} to {friend.name}?</h3>
@@ -147,29 +153,54 @@ function ApprovalCard({ n, me, state, busy, onDecide }: { n: PublicNegotiation; 
         <li><strong>Agreed</strong><strong>{money(n.agreedAmount)}</strong></li>
       </ul>
       <div className="row">
-        <button className="btn full" onClick={() => onDecide(n, "approved")} disabled={busy}>Approve and pay</button>
+        {checkout ? (
+          <button className="btn full" onClick={() => onCheckout(n)} disabled={busy}>Pay with PayPal</button>
+        ) : (
+          <button className="btn full" onClick={() => onDecide(n, "approved")} disabled={busy}>Approve and pay</button>
+        )}
         <button className="btn secondary" onClick={() => onDecide(n, "declined")} disabled={busy}>Not now</button>
       </div>
     </div>
   );
 }
 
-function LedgerTab({ me, state }: { me: UserId; state: AppState }) {
-  const open = state.expenses.filter((e) => !e.settledIn);
-  const settled = state.expenses.filter((e) => e.settledIn);
+export function pairOf(state: AppState, a: UserId, b: UserId) {
+  const key = [a, b].sort().join("|");
+  return state.pairs.find((p) => p.key === key)!;
+}
+
+/** Expenses that matter between these two: one of them paid and the other has a share. */
+function LedgerTab({ me, friend, state }: { me: UserId; friend: UserId; state: AppState }) {
   const name = (u: UserId) => (u === me ? "You" : state.users[u].name);
-  const Exp = ({ e }: { e: (typeof open)[number] }) => (
+  const between = state.expenses
+    .filter((e) => e.paidBy === me || e.paidBy === friend)
+    .map((e) => {
+      const owedBy = e.paidBy === me ? friend : me;
+      const mine = e.items.filter((i) => i.sharedBy.includes(owedBy));
+      const share = mine.filter((i) => !i.waived?.includes(owedBy)).reduce((s, i) => s + i.amount / i.sharedBy.length, 0);
+      return { e, owedBy, share, settled: Boolean(e.settledIn?.[owedBy]), relevant: mine.length > 0 };
+    })
+    .filter((x) => x.relevant)
+    .sort((x, y) => (x.e.date < y.e.date ? 1 : -1));
+  const open = between.filter((x) => !x.settled);
+  const settled = between.filter((x) => x.settled);
+  const splitLabel = (ids: UserId[]) =>
+    ids.length === 2 && ids.includes(me) && ids.includes(friend) ? "you two" : ids.length === Object.keys(state.users).length ? "everyone" : ids.map(name).join(", ");
+  const Exp = ({ x }: { x: (typeof between)[number] }) => (
     <div className="exp">
       <div className="exp-top">
-        <span>{e.description}</span>
-        <span>{money(e.items.reduce((s, i) => s + i.amount, 0))}</span>
+        <span>{x.e.description}{x.e.group && <span className="exp-group">{state.groups.find((g) => g.id === x.e.group)?.name}</span>}</span>
+        <span>{money(x.e.items.reduce((s, i) => s + i.amount, 0))}</span>
       </div>
-      <div className="exp-meta">{name(e.paidBy)} paid, {e.source === "receipt" ? "from a receipt" : e.source === "chat" ? "added by chat" : e.date}</div>
-      {e.items.length > 1 && (
+      <div className="exp-meta">
+        {name(x.e.paidBy)} paid, {x.e.source === "receipt" ? "from a receipt" : x.e.source === "chat" ? "added by chat" : x.e.date}.{" "}
+        {x.owedBy === me ? "Your" : `${state.users[x.owedBy].name}'s`} share {money(Math.round(x.share * 100) / 100)}
+      </div>
+      {(x.e.items.length > 1 || x.e.items.some((i) => i.sharedBy.length !== 2)) && (
         <ul className="exp-items">
-          {e.items.map((i) => (
+          {x.e.items.map((i) => (
             <li key={i.id}>
-              <span>{i.label} <span className="who">{i.sharedBy.length === 2 ? "shared" : `${name(i.sharedBy[0])} only`}</span></span>
+              <span>{i.label} <span className="who">{i.sharedBy.length === 1 ? `${name(i.sharedBy[0])} only` : `split by ${splitLabel(i.sharedBy)}`}</span></span>
               <span>{money(i.amount)}</span>
             </li>
           ))}
@@ -179,12 +210,12 @@ function LedgerTab({ me, state }: { me: UserId; state: AppState }) {
   );
   return (
     <div className="ph-body">
-      {open.length === 0 && <div className="bubble note">Nothing open. Tell your agent about the next thing you pay for.</div>}
-      {open.map((e) => <Exp key={e.id} e={e} />)}
+      {open.length === 0 && <div className="bubble note">Nothing open with {state.users[friend].name}. Tell your agent about the next thing you pay for.</div>}
+      {open.map((x) => <Exp key={x.e.id} x={x} />)}
       {settled.length > 0 && (
         <div className="settled">
           <div className="section-label">Settled</div>
-          {settled.map((e) => <Exp key={e.id} e={e} />)}
+          {settled.map((x) => <Exp key={x.e.id} x={x} />)}
         </div>
       )}
     </div>
@@ -212,7 +243,7 @@ function RulesTab({ me, state, busy, onConnect, onSavePolicy }: Parameters<typeo
         ) : (
           <>
             <strong>Connect PayPal</strong>
-            Approve once in PayPal so your agent can settle up for you. You can still negotiate without it; friends will get an invoice instead.
+            Approve once in PayPal so your agent can settle up for you. Without it, your agent still negotiates, and you approve each payment in PayPal.
             <div style={{ marginTop: 8 }}>
               <button className="btn" onClick={onConnect} disabled={busy}>Connect PayPal</button>
             </div>

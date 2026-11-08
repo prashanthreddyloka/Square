@@ -32,6 +32,7 @@ const kindClass = (t: AgentMessage["type"]) =>
 
 export function Channel(props: {
   state: AppState;
+  pair: [UserId, UserId];
   current: PublicNegotiation | null;
   reveal: number;
   busy: boolean;
@@ -39,15 +40,16 @@ export function Channel(props: {
   onStart: () => void;
   onRetry: (n: PublicNegotiation) => void;
 }) {
-  const { state, current, reveal, busy, error, onStart, onRetry } = props;
-  const s = state.statement;
-  const active = state.negotiations.find((n) => ["negotiating", "awaiting_approval", "settling", "payout_pending", "payout_failed", "unverified", "failed"].includes(n.status));
+  const { state, pair, current, reveal, busy, error, onStart, onRetry } = props;
+  const key = [...pair].sort().join("|");
+  const s = state.pairs.find((p) => p.key === key)!;
+  const active = state.negotiations.find((n) => n.pair === key && ["negotiating", "awaiting_approval", "awaiting_payer", "settling", "payout_pending", "payout_failed", "unverified", "failed"].includes(n.status));
   const waiting = Boolean(active);
   const shown = current ? current.messages.slice(0, reveal) : [];
   const done = current && reveal >= current.messages.length;
-  const left: UserId = "alex";
+  const left: UserId = pair[0];
   const name = (u: AgentMessage["from"]) => (u === "square" ? "Square" : `${state.users[u].name}'s agent`);
-  const earlier = state.negotiations.filter((n) => n.id !== current?.id && (n.status === "settled" || n.status === "invoiced"));
+  const earlier = state.negotiations.filter((n) => n.pair === key && n.id !== current?.id && (n.status === "settled" || n.status === "invoiced"));
 
   return (
     <section className="channel" aria-label="Agent channel">
@@ -57,7 +59,7 @@ export function Channel(props: {
           <p>
             {s.total > 0
               ? `${state.users[s.debtor].name} owes ${state.users[s.creditor].name} ${money(s.total)} before any questions. Their agents will check every line, settle on PayPal, and only ask when a rule says to.`
-              : "Nothing open right now. Add an expense on either phone and the agents will take it from there."}
+              : `Nothing open between ${state.users[pair[0]].name} and ${state.users[pair[1]].name}. Add an expense on either phone and the agents will take it from there.`}
           </p>
         </div>
         <button className="go" onClick={onStart} disabled={busy || waiting || s.total === 0}>
@@ -75,7 +77,7 @@ export function Channel(props: {
           </div>
         )}
         {shown.map((m) => (
-          <Entry key={m.id} m={m} state={state} align={m.from === "square" ? "center" : m.from === left ? "left" : "right"} name={name(m.from)} />
+          <Entry key={m.id} m={m} state={state} color={m.from === "square" ? undefined : state.users[m.from].color} align={m.from === "square" ? "center" : m.from === left ? "left" : "right"} name={name(m.from)} />
         ))}
         {done && current?.status === "settled" && current.settlement && <ReceiptBlock n={current} state={state} />}
       </div>
@@ -123,10 +125,10 @@ export function Channel(props: {
   );
 }
 
-function Entry({ m, state, align, name }: { m: AgentMessage; state: AppState; align: "left" | "right" | "center"; name: string }) {
+function Entry({ m, state, align, name, color }: { m: AgentMessage; state: AppState; align: "left" | "right" | "center"; name: string; color?: string }) {
   const d = (m.data || {}) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
   return (
-    <div className={`entry ${m.from} ${align === "right" ? "right" : ""} ${kindClass(m.type)}`}>
+    <div className={`entry ${m.from} ${align === "right" ? "right" : ""} ${kindClass(m.type)}`} style={color ? { ["--who" as string]: color } : undefined}>
       <div className="entry-head">
         <span><span className="from">{name}</span> <span className="kind">{KIND[m.type]}</span></span>
         <span className="sig" title={m.sig}>{m.sig ? `signed ${m.sig.slice(0, 8)}` : ""}</span>
@@ -150,12 +152,19 @@ function Entry({ m, state, align, name }: { m: AgentMessage; state: AppState; al
       {m.type === "PROPOSE" && Array.isArray(d.lines) && (
         <table className="lines">
           <tbody>
-            {d.lines.map((l: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
-              <tr key={l.itemId} className={l.signed < 0 ? "credit" : ""}>
-                <td>{l.label}</td>
-                <td className="amt">{l.signed < 0 ? `−${money(-l.signed)}` : money(l.signed)}</td>
-              </tr>
-            ))}
+            {d.lines.map((l: any, i: number) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+              const multi = new Set(d.lines.map((x: any) => x.group)).size > 1; // eslint-disable-line @typescript-eslint/no-explicit-any
+              const head = multi && (i === 0 || d.lines[i - 1].group !== l.group);
+              return [
+                head && (
+                  <tr key={`g-${l.group}-${i}`} className="group-row"><td colSpan={2}>{state.groups.find((g) => g.id === l.group)?.name ?? "Other"}</td></tr>
+                ),
+                <tr key={l.itemId} className={l.signed < 0 ? "credit" : ""}>
+                  <td>{l.label}</td>
+                  <td className="amt">{l.signed < 0 ? `−${money(-l.signed)}` : money(l.signed)}</td>
+                </tr>,
+              ];
+            })}
             <tr className="total"><td>Owed</td><td className="amt">{money(d.total)}</td></tr>
           </tbody>
         </table>
@@ -176,7 +185,10 @@ function Entry({ m, state, align, name }: { m: AgentMessage; state: AppState; al
           <tbody>
             {d.rulings.map((x: any) => ( // eslint-disable-line @typescript-eslint/no-explicit-any
               <tr key={x.itemId}>
-                <td><span className={x.accepted ? "struck" : ""}>{x.itemLabel}</span>: {x.why}</td>
+                <td>
+                  <span className={x.accepted ? "struck" : ""}>{x.itemLabel}</span>: {x.why}
+                  {x.check === "replaced" && <span className="checknote"> (rewritten by Square to match the decision)</span>}
+                </td>
                 <td className={`amt ${x.accepted ? "tag-removed" : "tag-kept"}`}>{x.accepted ? "removed" : "kept"}</td>
               </tr>
             ))}

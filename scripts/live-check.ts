@@ -45,7 +45,7 @@ async function main() {
   resetDB(false);
   mutate((d) => (d.users.alex.policy.autoApproveMax = 500));
   console.log("\nRun 1: default rules (AI agents negotiate, PayPal settles)");
-  let first = await negotiate();
+  let first = await negotiate("alex", "maya");
   if (first.status === "awaiting_approval") first = await decide(first.id, "approved");
   console.log(describe(first));
   const s = first.settlement;
@@ -61,14 +61,14 @@ async function main() {
       "We agreed to split everything on this trip 50/50, drinks and tickets included, no exceptions. Politely hold firm on every line.";
   });
   console.log("\nRun 2: Maya's rules changed to split everything");
-  const second = await negotiate();
+  const second = await negotiate("alex", "maya");
   console.log(describe(second));
   if (second.status === "awaiting_approval") await decide(second.id, "declined");
 
   const changed = second.agreedAmount !== first.agreedAmount;
   const report = `# Square live check (${new Date().toISOString()})
 
-PayPal sandbox and ${aiLabel()} (${aiMode() === "claude" ? process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5" : process.env.OPENAI_MODEL || "gpt-5-mini"}).
+PayPal sandbox and ${aiLabel()} (${aiMode() === "claude" ? process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5" : process.env.OPENAI_MODEL || "gpt-4.1-mini"}).
 
 ## Run 1: default rules, settled on PayPal
 ${describe(first)}

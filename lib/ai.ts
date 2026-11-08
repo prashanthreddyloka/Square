@@ -8,11 +8,20 @@
  * Callers use one shape (Claude-style content blocks); the OpenAI path translates.
  */
 export type AIMode = "claude" | "openai" | "demo";
-export const aiMode = (): AIMode => (process.env.ANTHROPIC_API_KEY ? "claude" : process.env.OPENAI_API_KEY ? "openai" : "demo");
+
+/** Tests can script the model's replies to check how Square handles bad or contradictory output. */
+type Scripted = (system: string, user: string) => string;
+const hook = globalThis as unknown as { __squareScriptedModel?: Scripted };
+export function scriptModel(fn: Scripted | null) {
+  hook.__squareScriptedModel = fn ?? undefined;
+}
+
+export const aiMode = (): AIMode =>
+  hook.__squareScriptedModel ? "openai" : process.env.ANTHROPIC_API_KEY ? "claude" : process.env.OPENAI_API_KEY ? "openai" : "demo";
 export const aiLabel = () => (aiMode() === "claude" ? "Claude" : aiMode() === "openai" ? "OpenAI" : "built-in rules");
 
 const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5-5";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 
 type Block =
   | { type: "text"; text: string }
@@ -110,7 +119,12 @@ async function callOpenAI(system: string, messages: ChatMessage[], tools: Claude
 
 /* ---------------- Shared API ---------------- */
 
-function call(system: string, messages: ChatMessage[], tools?: ClaudeTool[], maxTokens = 900) {
+function call(system: string, messages: ChatMessage[], tools?: ClaudeTool[], maxTokens = 900): Promise<Reply> {
+  if (hook.__squareScriptedModel) {
+    const last = messages[messages.length - 1];
+    const user = typeof last.content === "string" ? last.content : textOf(last.content);
+    return Promise.resolve({ content: [{ type: "text", text: hook.__squareScriptedModel(system, user) }], stop_reason: "end_turn" });
+  }
   return aiMode() === "openai" ? callOpenAI(system, messages, tools, maxTokens) : callClaude(system, messages, tools, maxTokens);
 }
 

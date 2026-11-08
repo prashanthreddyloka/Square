@@ -165,6 +165,77 @@ export async function chargeAllowance(opts: { vaultId: string; amount: number; d
   return { orderId: order.id, status: order.status, captureId: capture?.id };
 }
 
+/**
+ * Per-payment checkout: used when the payer has no saved allowance (for example when the
+ * sandbox account isn't enabled for Vault). The payer approves this one order in PayPal;
+ * Square captures it when they return. `requestId` makes creating the order idempotent.
+ */
+export async function createCheckoutOrder(opts: {
+  amount: number;
+  description: string;
+  reference: string;
+  requestId: string;
+  returnUrl: string;
+  cancelUrl: string;
+}) {
+  if (paypalMode() === "demo") {
+    const orderId = `DEMO-ORDER-${opts.requestId.replace(/[^A-Za-z0-9]/g, "").slice(-10).toUpperCase()}`;
+    return { orderId, approveUrl: `${opts.returnUrl}${opts.returnUrl.includes("?") ? "&" : "?"}token=${orderId}` };
+  }
+  const order = await pp<{ id: string; links: { rel: string; href: string }[] }>(
+    "POST",
+    "/v2/checkout/orders",
+    {
+      intent: "CAPTURE",
+      purchase_units: [
+        {
+          reference_id: opts.reference,
+          custom_id: opts.reference,
+          description: opts.description.slice(0, 127),
+          amount: { currency_code: "USD", value: opts.amount.toFixed(2) },
+        },
+      ],
+      payment_source: {
+        paypal: {
+          experience_context: {
+            brand_name: "Square",
+            locale: "en-US",
+            shipping_preference: "NO_SHIPPING",
+            user_action: "PAY_NOW",
+            return_url: opts.returnUrl,
+            cancel_url: opts.cancelUrl,
+          },
+        },
+      },
+    },
+    { "PayPal-Request-Id": opts.requestId },
+  );
+  const approveUrl = order.links.find((l) => l.rel === "payer-action" || l.rel === "approve")?.href;
+  if (!approveUrl) throw new Error("PayPal didn't return an approval link for the order.");
+  return { orderId: order.id, approveUrl };
+}
+
+/** Capture an order the payer approved. Safe to call twice: an already-captured order is read back, not charged again. */
+export async function captureCheckoutOrder(orderId: string, requestId: string) {
+  if (paypalMode() === "demo") {
+    demoHooks().charges.set(requestId, orderId);
+    return { orderId, status: "COMPLETED", captureId: orderId.replace("ORDER", "CAPTURE") };
+  }
+  type Order = { id: string; status: string; purchase_units?: { payments?: { captures?: { id: string; status: string }[] } }[] };
+  let order: Order;
+  try {
+    order = await pp<Order>("POST", `/v2/checkout/orders/${orderId}/capture`, {}, { "PayPal-Request-Id": `${requestId}-capture` });
+  } catch (e) {
+    if (!/ORDER_ALREADY_CAPTURED|UNPROCESSABLE/i.test((e as Error).message)) throw e;
+    order = await pp<Order>("GET", `/v2/checkout/orders/${orderId}`);
+  }
+  const capture = order.purchase_units?.[0]?.payments?.captures?.[0];
+  if (order.status !== "COMPLETED" || (capture && capture.status !== "COMPLETED")) {
+    throw new Error(`Order ${order.id} ended in status ${order.status}${capture ? ` (capture ${capture.status})` : ""}`);
+  }
+  return { orderId: order.id, status: order.status, captureId: capture?.id };
+}
+
 export type PayoutState = "succeeded" | "pending" | "failed";
 
 /** Map PayPal payout item statuses to what Square can safely act on. */

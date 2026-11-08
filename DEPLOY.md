@@ -35,6 +35,7 @@ Never commit `.env`; it's already in `.gitignore`.
    | `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` | from your sandbox app |
    | `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`) | your OpenAI key (or Anthropic key) |
    | `ALEX_SANDBOX_EMAIL`, `MAYA_SANDBOX_EMAIL` | the two sandbox personal accounts |
+   | `SAM_SANDBOX_EMAIL`, `PRIYA_SANDBOX_EMAIL` | optional: sandbox accounts for the other two friends, if you'll settle their pairs live |
    | `PAYPAL_MERCHANT_EMAIL` | your sandbox business account email (optional) |
    | `SQUARE_ACCESS_CODE` | a code you'll share only with people who should use the demo |
    | `APP_URL` | leave blank for now |
@@ -43,7 +44,9 @@ Never commit `.env`; it's already in `.gitignore`.
 3. Click **Apply**. The first build takes a few minutes. You get a URL like `https://square-agents.onrender.com`.
 4. Set `APP_URL` to that URL (no trailing slash) in the service's **Environment** tab and save. Render redeploys.
 
-## 4. Connect Alex's PayPal once, then pin it
+## 4. Optional: connect Alex's PayPal allowance once, then pin it
+
+Skip this if your sandbox app can't use Vault (PayPal shows "PayPal isn't available at this time" after login). Square then asks Alex to approve each payment in PayPal checkout instead, which every sandbox account supports.
 
 1. Open your URL and enter your access code. The header should say **PayPal sandbox connected** and **Agents run on OpenAI** (or Claude).
 2. On Alex's phone: **Rules > Connect PayPal**, log in with Alex's sandbox account, approve.
@@ -58,7 +61,7 @@ In your sandbox app, add a webhook to `https://<your-url>/api/webhooks/paypal` f
 
 ## 6. Check it like a visitor would
 
-Open the URL in a private window, enter the code, and run: **Reset the trip > Let our agents settle up > Approve and pay**. Then log into sandbox.paypal.com as Maya and confirm the $241 arrived.
+Open the URL in a private window, enter the code, and run: **Reset the trip > Alex owes Maya > Let our agents settle up > Approve and pay** (or **Pay with PayPal**, logging in as Alex's sandbox account). Then log into sandbox.paypal.com as Maya and confirm the $241 arrived.
 
 Locally, `npm run test:live` does the same against the sandbox and the AI model, plus a run with Maya's rules changed, and writes `data/live-check.md`.
 

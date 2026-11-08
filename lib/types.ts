@@ -1,4 +1,5 @@
-export type UserId = "alex" | "maya";
+/** A group member's id, e.g. "alex". */
+export type UserId = string;
 
 export type ItemKind = "consumable" | "shared-fixed";
 
@@ -8,6 +9,7 @@ export interface LineItem {
   amount: number;
   kind: ItemKind; // consumables can be personal; fixed costs (rent, tickets, rides) are shared by booking
   sharedBy: UserId[];
+  waived?: UserId[]; // members whose share was dropped in a settle-up (the payer absorbs it)
 }
 
 export interface Expense {
@@ -17,9 +19,12 @@ export interface Expense {
   date: string;
   items: LineItem[];
   source: "seed" | "chat" | "receipt";
-  settledIn?: string; // negotiation id that paid for it (confirmed)
-  invoicedIn?: string; // negotiation id whose PayPal invoice now carries it (unpaid until PayPal says so)
-  reservedBy?: string; // negotiation id currently settling it; nothing else may include it
+  group?: string; // which group it belongs to; settle-ups between two people cover all their groups
+  // Each member's share of an expense is settled with the payer separately, so these are keyed
+  // by the member who owes the share (never the payer).
+  settledIn?: Record<UserId, string>; // share paid, in this negotiation (confirmed)
+  invoicedIn?: Record<UserId, string>; // share carried by this negotiation's PayPal invoice (unpaid until PayPal says so)
+  reservedBy?: Record<UserId, string>; // share is part of this in-progress negotiation; nothing else may include it
 }
 
 export interface PayPalLink {
@@ -81,15 +86,16 @@ export interface Dispute {
   itemId: string;
   itemLabel: string;
   reason: string;
-  remove: UserId; // who should be removed from sharedBy
-  accepted?: boolean;
-  ruling?: string;
+  remove: UserId; // whose share of the item is waived if accepted
+  accepted?: boolean; // the creditor's decision; the only thing the amount is computed from
+  ruling?: string; // the explanation shown, checked against the decision before it is shown
+  rulingCheck?: "rules" | "matched" | "replaced"; // how the explanation was checked
 }
 
 export interface Statement {
   debtor: UserId;
   creditor: UserId;
-  lines: { expenseId: string; itemId: string; label: string; expense: string; paidBy: UserId; share: number; signed: number }[];
+  lines: { expenseId: string; itemId: string; label: string; expense: string; group?: string; paidBy: UserId; owedBy: UserId; share: number; signed: number }[];
   total: number;
 }
 
@@ -136,6 +142,7 @@ export interface Negotiation {
     | "negotiating" // agents are talking; its expenses are reserved
     | "agreed"
     | "awaiting_approval"
+    | "awaiting_payer" // sent to PayPal to approve this one payment; nothing charged yet
     | "settling" // locked: a settlement attempt is running
     | "payout_pending" // charged; PayPal hasn't confirmed the friend received it
     | "payout_failed" // charged; payout failed and can be retried without charging again
@@ -146,7 +153,7 @@ export interface Negotiation {
     | "failed" // charge didn't complete; retry is safe (idempotent charge)
     | "error" // negotiation broke before any payment; expenses released
     | "nothing_owed";
-  expenseIds: string[]; // exactly the expenses this settle-up covers, fixed when it starts
+  claims: { expenseId: string; user: UserId }[]; // exactly the shares this settle-up covers, fixed when it starts
   debtor: UserId;
   creditor: UserId;
   startedAt: string;
@@ -154,14 +161,23 @@ export interface Negotiation {
   disputes: Dispute[];
   initialTotal: number;
   agreedAmount: number;
-  approval?: { userId: UserId; reason: string; decidedAt?: string; decision?: "approved" | "declined" };
+  reviewFlag?: string; // set when an agent's words didn't match its decision; forces human approval
+  approval?: { userId: UserId; reason: string; mode?: "allowance" | "checkout"; decidedAt?: string; decision?: "approved" | "declined" };
   payment?: PaymentProgress;
   settlement?: Settlement;
   aiMode: "claude" | "openai" | "demo";
 }
 
+export interface Group {
+  id: string;
+  name: string;
+  members: UserId[];
+}
+
 export interface DB {
+  version?: number; // data format; older saved files are replaced with a fresh seed
   users: Record<UserId, User>;
+  groups: Group[];
   expenses: Expense[];
   negotiations: Negotiation[];
   webhookEvents: { id: string; type: string; receivedAt: string; summary: string }[];

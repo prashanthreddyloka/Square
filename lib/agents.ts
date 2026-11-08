@@ -1,6 +1,6 @@
 import { aiMode, ask, askJSON, askWithTools, imageBlock } from "./ai";
-import { buildStatement, money, other, round2 } from "./ledger";
-import { chargeAllowance, createPayout, payoutStatus, paypalMode, verifyOrder } from "./paypal";
+import { buildStatement, freeShare, money, pairKey, round2, type ShareFilter } from "./ledger";
+import { captureCheckoutOrder, chargeAllowance, createCheckoutOrder, createPayout, payoutStatus, paypalMode, verifyOrder } from "./paypal";
 import { getDB, mutate, uid } from "./store";
 import { claudeTools, runTool, sendFriendInvoice } from "./toolkit";
 import { checkTrustCard, issueTrustCard, sha256, sign, signMessage } from "./trust";
@@ -31,70 +31,114 @@ function persona(u: User, counterparty: User) {
 type ParsedExpense = {
   description: string;
   paidBy: UserId;
+  group?: string;
   items: { label: string; amount: number; kind: "consumable" | "shared-fixed"; sharedBy: UserId[] }[];
   reply: string;
 };
 
-export async function captureExpense(author: UserId, text: string, image?: string): Promise<{ expense: Expense; reply: string }> {
+/**
+ * Turn a chat message (or receipt photo) into a group expense. `friend` is who the author is
+ * chatting about; by default the expense is split between the two of them, but the message
+ * can name other group members ("for me, Sam and Priya") or a different payer.
+ */
+export async function captureExpense(author: UserId, friendId: UserId, text: string, image?: string, groupHint?: string): Promise<{ expense: Expense; reply: string }> {
   const db = getDB();
   const me = db.users[author];
-  const friend = db.users[other(author)];
+  const friend = db.users[friendId];
+  if (!me || !friend || author === friendId) throw new Error("Pick two different people in the group.");
+  const ids = Object.keys(db.users);
+  const roster = ids.map((id) => `${db.users[id].name} (id "${id}")`).join(", ");
+  const groups = db.groups.map((g) => `"${g.id}" = ${g.name} (${g.members.map((m) => db.users[m].name).join(", ")})`).join("; ");
   let parsed: ParsedExpense;
 
   if (aiMode() !== "demo") {
     const system = [
-      `You turn a message from ${me.name} (and optionally a receipt photo) into a shared expense between ${me.name} (id "${me.id}") and ${friend.name} (id "${friend.id}").`,
-      `Return {"description": string, "paidBy": "alex"|"maya", "items": [{"label": string, "amount": number, "kind": "consumable"|"shared-fixed", "sharedBy": ["alex"|"maya", ...]}], "reply": string}.`,
+      `You turn a message from ${me.name} (and optionally a receipt photo) into a shared expense in a group of friends: ${roster}.`,
+      `${me.name} is chatting about expenses shared with ${friend.name}.`,
+      `Return {"description": string, "paidBy": member id, "items": [{"label": string, "amount": number, "kind": "consumable"|"shared-fixed", "sharedBy": [member ids]}], "reply": string}.`,
       `Itemize receipts line by line when you can read them, so items can later be disputed individually. Use "consumable" for food, drinks and personal goods, "shared-fixed" for rent, tickets, rides and bookings.`,
-      `Default sharedBy to both people unless the message says otherwise. Assume ${me.name} paid unless the message says ${friend.name} paid.`,
-      `Amounts are in USD and must add up to the receipt total. "reply" is a one-sentence confirmation to ${me.name}.`,
+      `Default sharedBy to ["${me.id}", "${friend.id}"]. If the message names other members or says "everyone" / "all of us", include exactly those members (and ${me.name} unless the message says otherwise).`,
+      `Assume ${me.name} paid unless the message says someone else paid. Only use the member ids listed.`,
+      `Groups: ${groups}. Set "group" to the id of the group this belongs to, judging by what it was for (rent and bills go with roommates, trip costs with the trip).${groupHint ? ` ${me.name} is looking at "${groupHint}" right now, so prefer it if it fits.` : ""} It must contain everyone in sharedBy and the payer.`,
+      `Amounts are in USD and must add up to the receipt total. "reply" is a one-sentence confirmation to ${me.name} that says who it's split with.`,
     ].join("\n");
-    const content = image
-      ? [imageBlock(image), { type: "text" as const, text: text || "Here's the receipt." }]
-      : text;
+    const content = image ? [imageBlock(image), { type: "text" as const, text: text || "Here's the receipt." }] : text;
     parsed = await askJSON<ParsedExpense>(system, content);
   } else {
     if (image) throw new Error("Reading receipt photos needs an AI model. Add ANTHROPIC_API_KEY or OPENAI_API_KEY, or type the amount instead.");
-    parsed = ruleBasedParse(author, friend.id, text);
+    parsed = ruleBasedParse(author, friendId, text);
   }
 
+  const known = (u: unknown): u is UserId => typeof u === "string" && ids.includes(u);
   const items: LineItem[] = (parsed.items || [])
     .filter((i) => Number(i.amount) > 0)
-    .map((i) => ({
-      id: uid("i"),
-      label: String(i.label).slice(0, 80),
-      amount: round2(Number(i.amount)),
-      kind: i.kind === "shared-fixed" ? "shared-fixed" : "consumable",
-      sharedBy: (i.sharedBy?.length ? i.sharedBy : ["alex", "maya"]).filter((u): u is UserId => u === "alex" || u === "maya"),
-    }));
+    .map((i) => {
+      const sharedBy = [...new Set((i.sharedBy || []).filter(known))];
+      return {
+        id: uid("i"),
+        label: String(i.label).slice(0, 80),
+        amount: round2(Number(i.amount)),
+        kind: i.kind === "shared-fixed" ? ("shared-fixed" as const) : ("consumable" as const),
+        sharedBy: sharedBy.length >= 2 ? sharedBy : [author, friendId],
+      };
+    });
   if (items.length === 0) throw new Error("I couldn't find an amount in that. Try something like “I paid $42 for groceries”.");
 
+  const paidBy = known(parsed.paidBy) ? parsed.paidBy : author;
   const expense: Expense = {
     id: uid("exp"),
     description: String(parsed.description || items[0].label).slice(0, 80),
-    paidBy: parsed.paidBy === "alex" || parsed.paidBy === "maya" ? parsed.paidBy : author,
+    group: pickGroup([paidBy, ...items.flatMap((i) => i.sharedBy)], parsed.group, groupHint),
+    paidBy,
     date: now().slice(0, 10),
     source: image ? "receipt" : "chat",
     items,
   };
   mutate((d) => d.expenses.push(expense));
-  return { expense, reply: parsed.reply || `Added ${expense.description} for ${money(items.reduce((s, i) => s + i.amount, 0))}, split with ${friend.name}.` };
+  const others = [...new Set(items.flatMap((i) => i.sharedBy))].filter((u) => u !== author).map((u) => db.users[u].name);
+  const where = expense.group ? ` Filed under ${groupName(expense.group)}.` : "";
+  return {
+    expense,
+    reply: (parsed.reply || `Added ${expense.description} for ${money(items.reduce((s, i) => s + i.amount, 0))}, split with ${others.join(", ")}.`) + where,
+  };
 }
 
-function ruleBasedParse(author: UserId, friend: UserId, text: string): ParsedExpense {
+/**
+ * Which group an expense goes in: one that contains everyone involved. Prefer the model's choice,
+ * then the group the person is looking at, then the group these people used most recently.
+ */
+function pickGroup(people: UserId[], suggested?: string, hint?: string): string | undefined {
+  const db = getDB();
+  const fits = db.groups.filter((g) => people.every((p) => g.members.includes(p)));
+  if (!fits.length) return undefined;
+  for (const id of [suggested, hint]) if (id && fits.some((g) => g.id === id)) return id;
+  const recent = [...db.expenses]
+    .filter((e) => fits.some((g) => g.id === e.group))
+    .sort((x, y) => (x.date < y.date ? 1 : -1))[0];
+  // Smallest group wins ties: two roommates' groceries belong with the roommates, not the trip.
+  return recent?.group ?? [...fits].sort((x, y) => x.members.length - y.members.length)[0].id;
+}
+
+function ruleBasedParse(author: UserId, friendId: UserId, text: string): ParsedExpense {
+  const db = getDB();
   const amounts = [...text.matchAll(/\$?\s?(\d+(?:\.\d{1,2})?)/g)].map((m) => Number(m[1]));
   const amount = amounts[0] ?? 0;
   const lower = text.toLowerCase();
-  const friendName = friend === "alex" ? "alex" : "maya";
-  const paidBy: UserId = new RegExp(`${friendName} paid`).test(lower) ? friend : author;
-  const forMatch = /for (.+?)(?:[,.]|$)/i.exec(text);
-  const label = forMatch ? forMatch[1].trim() : "Shared expense";
-  const fixed = /(rent|airbnb|hotel|ticket|uber|taxi|ride|flight|train|parking)/i.test(text);
+  const ids = Object.keys(db.users);
+  const payer = ids.find((id) => id !== author && new RegExp(`\\b${db.users[id].name.toLowerCase()} paid`).test(lower)) || author;
+  const named = ids.filter((id) => new RegExp(`\\b${db.users[id].name.toLowerCase()}\\b`).test(lower));
+  const sharedBy = /\b(everyone|all of us|the group)\b/.test(lower)
+    ? ids
+    : [...new Set([author, ...(named.length ? named : [friendId])])];
+  const forMatch = /for (.+?)(?:[,.]| with | for me|$)/i.exec(text);
+  const raw = forMatch ? forMatch[1].trim() : "Shared expense";
+  const label = raw.charAt(0).toUpperCase() + raw.slice(1);
+  const fixed = /(rent|airbnb|hotel|ticket|uber|taxi|ride|flight|train|parking|lesson)/i.test(text);
   return {
-    description: label.charAt(0).toUpperCase() + label.slice(1),
-    paidBy,
-    items: [{ label: label.charAt(0).toUpperCase() + label.slice(1), amount, kind: fixed ? "shared-fixed" : "consumable", sharedBy: ["alex", "maya"] }],
-    reply: `Got it: ${label} for ${money(amount)}, split evenly.`,
+    description: label,
+    paidBy: payer,
+    items: [{ label, amount, kind: fixed ? "shared-fixed" : "consumable", sharedBy }],
+    reply: `Got it: ${label} for ${money(amount)}, split evenly with ${sharedBy.filter((u) => u !== author).map((u) => db.users[u].name).join(", ")}.`,
   };
 }
 
@@ -103,11 +147,70 @@ function ruleBasedParse(author: UserId, friend: UserId, text: string): ParsedExp
 /* ------------------------------------------------------------------ */
 
 type Review = { disputes: { itemId: string; reason: string }[]; message: string };
-type Ruling = { rulings: { itemId: string; accept: boolean; reason: string }[]; message: string };
+type Decision = "remove" | "keep";
+type Ruling = { rulings: { itemId: string; decision: Decision; reason: string }[]; message: string };
+
+/* ---- Keeping the agents' words consistent with what Square charges ----
+ * The amount is computed only from each ruling's structured decision. Anything a model writes
+ * in free text is checked against those decisions before it is shown; text that doesn't match
+ * is retried once, then replaced with plain wording generated from the decision, and the
+ * settle-up goes to the human for approval instead of paying automatically. */
+
+const asDecision = (r: { decision?: unknown; accept?: unknown }): Decision | null =>
+  r.decision === "remove" || r.decision === "keep" ? r.decision : typeof r.accept === "boolean" ? (r.accept ? "remove" : "keep") : null;
+
+/** An independent read of an explanation: does it say the item comes off the bill or stays? */
+async function explanationSays(itemLabel: string, debtorName: string, reason: string): Promise<Decision | "unclear"> {
+  try {
+    const r = await askJSON<{ says?: string }>(
+      "You check another agent's explanation for consistency. You do not decide anything yourself; you only report what the text says.",
+      [
+        `Item: "${itemLabel}".`,
+        `Explanation: "${reason}"`,
+        `Does the explanation say ${debtorName}'s share of this item is removed from the bill, or kept on it?`,
+        `Return {"says": "remove" | "keep" | "unclear"}.`,
+      ].join("\n"),
+      100,
+    );
+    return r.says === "remove" || r.says === "keep" ? r.says : "unclear";
+  } catch {
+    return "unclear";
+  }
+}
+
+/** Every dollar amount a sentence mentions must be one Square computed. */
+function amountsMatch(text: string, allowed: number[]) {
+  const found = [...text.matchAll(/\$\s?(\d[\d,]*(?:\.\d{1,2})?)/g)].map((m) => Number(m[1].replace(/,/g, "")));
+  return found.every((v) => allowed.some((a) => Math.abs(a - v) < 0.005));
+}
+
+/** Free text from an agent, kept only if it uses Square's numbers and doesn't name items it shouldn't. */
+async function sayChecked(u: User, counterparty: User, prompt: string, fallback: string, allowed: number[], avoid: string[] = []) {
+  const text = await say(u, counterparty, prompt, fallback);
+  if (text === fallback) return text;
+  const lower = text.toLowerCase();
+  if (!amountsMatch(text, allowed) || avoid.some((a) => lower.includes(a.toLowerCase()))) return fallback;
+  return text;
+}
+
+const plainRuling = (creditor: User, debtor: User, d: Decision) =>
+  d === "remove" ? `${creditor.name}'s agent agreed to take ${debtor.name}'s share off.` : `${creditor.name}'s agent kept ${debtor.name}'s share on the bill.`;
+
+/** Summary of the rulings, written from the decisions themselves. */
+function rulingSummary(creditor: User, disputes: Dispute[]) {
+  const off = disputes.filter((d) => d.accepted).map((d) => d.itemLabel);
+  const kept = disputes.filter((d) => !d.accepted).map((d) => d.itemLabel);
+  const list = (xs: string[]) => (xs.length < 2 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+  if (!kept.length) return off.length === 1 ? `Fair enough, I've taken off ${list(off)}.` : `All fair, I've taken off ${list(off)}.`;
+  if (!off.length) return `I've looked at each one. Under ${creditor.name}'s rules, ${list(kept)} ${kept.length === 1 ? "stays" : "stay"} on the bill.`;
+  return `I've taken off ${list(off)}. Under ${creditor.name}'s rules, ${list(kept)} ${kept.length === 1 ? "stays" : "stay"}.`;
+}
+
+const groupName = (id?: string) => getDB().groups.find((g) => g.id === id)?.name ?? "no group";
 
 function statementText(s: Statement, db = getDB()) {
   return s.lines
-    .map((l) => `- [${l.itemId}] ${l.label} (${l.expense}, paid by ${db.users[l.paidBy].name}): ${l.signed >= 0 ? "" : "credit "}${money(Math.abs(l.signed))}`)
+    .map((l) => `- [${l.itemId}] ${l.label} (${l.expense}${l.group ? `, ${groupName(l.group)}` : ""}, paid by ${db.users[l.paidBy].name}): ${l.signed >= 0 ? "" : "credit "}${money(Math.abs(l.signed))}`)
     .join("\n");
 }
 
@@ -118,7 +221,7 @@ async function debtorReview(debtor: User, creditor: User, s: Statement): Promise
     const items = owedLines.map((l) => {
       const exp = db.expenses.find((e) => e.id === l.expenseId)!;
       const it = exp.items.find((i) => i.id === l.itemId)!;
-      return `- itemId "${l.itemId}": ${l.label} (${l.expense}), kind ${it.kind}, ${debtor.name}'s share ${money(l.share)}`;
+      return `- itemId "${l.itemId}": ${l.label} (${l.expense}, ${groupName(l.group)}), kind ${it.kind}, ${debtor.name}'s share ${money(l.share)}`;
     });
     return askJSON<Review>(
       persona(debtor, creditor),
@@ -150,7 +253,7 @@ async function debtorReview(debtor: User, creditor: User, s: Statement): Promise
   };
 }
 
-async function creditorRuling(creditor: User, debtor: User, disputes: Dispute[]): Promise<Ruling> {
+async function creditorRuling(creditor: User, debtor: User, disputes: Dispute[], feedback = ""): Promise<Ruling> {
   const db = getDB();
   if (aiMode() !== "demo") {
     const lines = disputes.map((d) => {
@@ -162,17 +265,21 @@ async function creditorRuling(creditor: User, debtor: User, disputes: Dispute[])
       [
         `${debtor.name}'s agent disputes these lines:\n${lines.join("\n")}`,
         `Decide each one by following ${creditor.name}'s instructions exactly. Be fair, not stubborn.`,
-        `Return {"rulings":[{"itemId": string, "accept": boolean, "reason": string}], "message": string}.`,
-      ].join("\n\n"),
+        `For each line, first write a one-sentence reason addressed to ${debtor.name}'s agent, then a decision: "remove" takes ${debtor.name}'s share off the bill, "keep" leaves it on. The reason must say the same thing as the decision.`,
+        `Return {"rulings":[{"itemId": string, "reason": string, "decision": "remove" | "keep"}]}.`,
+        feedback,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
     );
   }
   const rulings = disputes.map((d) => {
     const it = db.expenses.find((e) => e.id === d.expenseId)!.items.find((i) => i.id === d.itemId)!;
     return it.kind === "consumable"
-      ? { itemId: d.itemId, accept: true, reason: `Fair enough, ${debtor.name} didn't have it.` }
-      : { itemId: d.itemId, accept: false, reason: `That was booked for both of you, so it stays split even though ${debtor.name} left early.` };
+      ? { itemId: d.itemId, decision: "remove" as const, reason: `Fair enough, ${debtor.name} didn't have it.` }
+      : { itemId: d.itemId, decision: "keep" as const, reason: `That was booked for ${debtor.name} too, so it stays split even though ${debtor.name} didn't use all of it.` };
   });
-  const accepted = rulings.filter((r) => r.accept).length;
+  const accepted = rulings.filter((r) => r.decision === "remove").length;
   return {
     rulings,
     message:
@@ -182,6 +289,55 @@ async function creditorRuling(creditor: User, debtor: User, disputes: Dispute[])
           ? `I hear you, but ${creditor.name}'s rule is that shared bookings stay shared.`
           : `I'll take one off, but ${creditor.name}'s rule is that shared bookings stay shared.`,
   };
+}
+
+/**
+ * Get the creditor's decision on each dispute and an explanation that says the same thing.
+ * Retries once with feedback; anything still inconsistent is replaced and flagged for the human.
+ */
+async function decideDisputes(n: Negotiation, creditor: User, debtor: User) {
+  let feedback = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let ruling: Ruling;
+    try {
+      ruling = await creditorRuling(creditor, debtor, n.disputes, feedback);
+    } catch {
+      ruling = { rulings: [], message: "" };
+    }
+    const problems: string[] = [];
+    for (const d of n.disputes) {
+      const r = ruling.rulings?.find((x) => x.itemId === d.itemId);
+      const decision = r ? asDecision(r as { decision?: unknown; accept?: unknown }) : null;
+      if (!decision) {
+        problems.push(`No valid decision for "${d.itemLabel}".`);
+        d.accepted = false;
+        d.ruling = plainRuling(creditor, debtor, "keep");
+        d.rulingCheck = "replaced";
+        continue;
+      }
+      d.accepted = decision === "remove";
+      const reason = String(r?.reason || "").trim();
+      if (aiMode() === "demo") {
+        d.ruling = reason;
+        d.rulingCheck = "rules";
+        continue;
+      }
+      const says = reason ? await explanationSays(d.itemLabel, debtor.name, reason) : "unclear";
+      if (says === decision) {
+        d.ruling = reason;
+        d.rulingCheck = "matched";
+      } else {
+        problems.push(`For "${d.itemLabel}" your decision was "${decision}" but your reason reads as "${says}".`);
+        d.ruling = plainRuling(creditor, debtor, decision);
+        d.rulingCheck = "replaced";
+      }
+    }
+    if (!problems.length) return;
+    feedback = `Your previous answer was inconsistent: ${problems.join(" ")} Decide again; each reason must say exactly what its decision does.`;
+  }
+  // Still inconsistent after a retry: the amount follows the structured decisions, the shown
+  // explanations were rewritten from them, and a human confirms before any money moves.
+  n.reviewFlag = `${creditor.name}'s agent gave an explanation that didn't match its decision, so Square rewrote it from the decision.`;
 }
 
 async function say(u: User, counterparty: User, prompt: string, fallback: string) {
@@ -200,15 +356,21 @@ function sentThisWeek(user: UserId) {
     .reduce((s, n) => s + n.agreedAmount, 0);
 }
 
-export async function negotiate(): Promise<Negotiation> {
+/** The shares a negotiation covers: used to compute its statement over exactly those shares. */
+const claimedBy = (n: Negotiation): ShareFilter => (e, u) => n.claims.some((c) => c.expenseId === e.id && c.user === u);
+
+export async function negotiate(a: UserId, b: UserId): Promise<Negotiation> {
   // Everything up to the first `await` runs synchronously, so checking for an active settle-up
-  // and reserving the expenses happen atomically: a second simultaneous request sees the
-  // reservation and gets a Conflict instead of negotiating (and later charging) the same expenses.
-  const { n, open } = mutate((db) => {
-    const busy = db.negotiations.find((x) => ACTIVE.includes(x.status));
-    if (busy) throw new Conflict(`Finish the current settle-up first (it's ${busy.status.replace("_", " ")}).`);
-    const open = db.expenses.filter((e) => !e.settledIn && !e.invoicedIn && !e.reservedBy);
-    const s = buildStatement(open);
+  // between these two and reserving their shares happen atomically: a second simultaneous request
+  // sees the reservation and gets a Conflict instead of negotiating (and later charging) the same shares.
+  // Different pairs in the group never touch the same shares, so they can settle in parallel.
+  const n = mutate((db) => {
+    if (!db.users[a] || !db.users[b] || a === b) throw new Error("Pick two different people in the group.");
+    const key = pairKey(a, b);
+    const busy = db.negotiations.find((x) => ACTIVE.includes(x.status) && pairKey(x.debtor, x.creditor) === key);
+    if (busy) throw new Conflict(`Finish ${db.users[a].name} and ${db.users[b].name}'s current settle-up first (it's ${busy.status.replace("_", " ")}).`);
+    const s = buildStatement(db.expenses, [a, b], [], freeShare);
+    const claims = [...new Map(s.lines.map((l) => [`${l.expenseId}:${l.owedBy}`, { expenseId: l.expenseId, user: l.owedBy }])).values()];
     const n: Negotiation = {
       id: uid("neg"),
       status: s.total === 0 ? "nothing_owed" : "negotiating",
@@ -219,22 +381,27 @@ export async function negotiate(): Promise<Negotiation> {
       disputes: [],
       initialTotal: s.total,
       agreedAmount: s.total,
-      expenseIds: open.map((e) => e.id),
+      claims: s.total > 0 ? claims : [],
       aiMode: aiMode(),
     };
-    if (s.total > 0) for (const e of open) e.reservedBy = n.id;
+    for (const c of n.claims) {
+      const e = db.expenses.find((x) => x.id === c.expenseId)!;
+      (e.reservedBy ??= {})[c.user] = n.id;
+    }
     db.negotiations.unshift(n);
-    return { n, open };
+    return n;
   });
   const db = getDB();
-  const s0 = buildStatement(open);
+  const pair: [UserId, UserId] = [n.debtor, n.creditor];
+  const covered = db.expenses.filter((e) => n.claims.some((c) => c.expenseId === e.id));
+  const s0 = buildStatement(db.expenses, pair, [], claimedBy(n));
   const debtor = db.users[n.debtor];
   const creditor = db.users[n.creditor];
   const push = (m: AgentMessage) => n.messages.push(m);
 
   try {
     if (s0.total === 0) {
-      push(msg("square", "AGREE", "Nothing to settle. You two are all square."));
+      push(msg("square", "AGREE", `Nothing to settle. ${db.users[a].name} and ${db.users[b].name} are all square.`));
       return save(n);
     }
 
@@ -258,7 +425,7 @@ export async function negotiate(): Promise<Negotiation> {
           checks.creditorCardValid && checks.debtorCardValid ? "Both credentials carry valid Square signatures." : "A credential failed Square's signature check.",
           checks.debtorPayPalLinked
             ? `${debtor.name} approved an agent allowance through PayPal, so ${debtor.name}'s agent can pay within ${debtor.name}'s limits.`
-            : `${debtor.name} hasn't approved a PayPal allowance yet, so ${debtor.name}'s agent can negotiate but can't pay. If you agree, ${creditor.name}'s agent will send a PayPal invoice instead.`,
+            : `${debtor.name} hasn't approved a PayPal allowance yet, so ${debtor.name}'s agent can negotiate but can't pay. If you agree, ${debtor.name} approves this one payment in PayPal instead.`,
           `${creditor.name} will be paid at ${maskEmail(creditor.paypal.payerEmail || creditor.sandboxEmail)}.`,
         ].join(" "),
         checks,
@@ -271,13 +438,14 @@ export async function negotiate(): Promise<Negotiation> {
     }
 
     // 2. Proposal: creditor's agent sends the itemized statement Square computed.
-    const proposeText = await say(
+    const proposeText = await sayChecked(
       creditor,
       debtor,
-      `Open the settle-up with ${debtor.name}'s agent. Net, ${debtor.name} owes ${money(s0.total)} across ${s0.lines.length} lines from the shared trip. Mention the total and invite them to check the lines.`,
+      `Open the settle-up with ${debtor.name}'s agent. Net, ${debtor.name} owes ${money(s0.total)} across ${s0.lines.length} lines from the expenses they shared. Mention the total and invite them to check the lines.`,
       `Across your shared expenses, ${debtor.name} owes ${creditor.name} ${money(s0.total)} net. Itemized lines attached, take a look.`,
+      [s0.total],
     );
-    push(msg(creditor.id, "PROPOSE", proposeText, { total: s0.total, lines: s0.lines, ledgerHash: sha256(open).slice(0, 16) }));
+    push(msg(creditor.id, "PROPOSE", proposeText, { total: s0.total, lines: s0.lines, ledgerHash: sha256(covered).slice(0, 16) }));
 
     // 3. Review: debtor's agent checks each line against what it knows about its human.
     const review = await debtorReview(debtor, creditor, s0);
@@ -291,35 +459,67 @@ export async function negotiate(): Promise<Negotiation> {
     n.disputes = valid;
 
     if (valid.length) {
-      push(msg(debtor.id, "DISPUTE", review.message, { disputes: valid.map(({ itemId, itemLabel, reason }) => ({ itemId, itemLabel, reason })) }));
+      const disputeText = amountsMatch(review.message || "", [s0.total, ...s0.lines.map((l) => l.share)]) && review.message
+        ? review.message
+        : `Before ${debtor.name} pays, I'd like to raise ${valid.length === 1 ? "one line" : `${valid.length} lines`}.`;
+      push(msg(debtor.id, "DISPUTE", disputeText, { disputes: valid.map(({ itemId, itemLabel, reason }) => ({ itemId, itemLabel, reason })) }));
 
       // 4. Ruling: creditor's agent decides each dispute under its human's rules.
-      const ruling = await creditorRuling(creditor, debtor, valid);
-      for (const d of n.disputes) {
-        const r = ruling.rulings.find((x) => x.itemId === d.itemId);
-        d.accepted = Boolean(r?.accept);
-        d.ruling = r?.reason || (d.accepted ? "Accepted." : "Declined.");
-      }
-      push(msg(creditor.id, "RULING", ruling.message, { rulings: n.disputes.map(({ itemId, itemLabel, accepted, ruling: why }) => ({ itemId, itemLabel, accepted, why })) }));
+      await decideDisputes(n, creditor, debtor);
+      push(
+        msg(creditor.id, "RULING", rulingSummary(creditor, n.disputes), {
+          rulings: n.disputes.map(({ itemId, itemLabel, accepted, ruling: why, rulingCheck }) => ({ itemId, itemLabel, accepted, why, check: rulingCheck })),
+        }),
+      );
     }
 
     // 5. Agreement on a number Square recomputes from the accepted adjustments.
-    const s1 = buildStatement(open, n.disputes);
-    n.agreedAmount = s1.total;
+    const s1 = buildStatement(db.expenses, pair, n.disputes, claimedBy(n));
+    // If the accepted adjustments wipe out (or flip) what the debtor owes, nothing moves.
+    n.agreedAmount = s1.debtor === n.debtor ? s1.total : 0;
+    if (n.agreedAmount === 0) {
+      push(msg("square", "AGREE", `After those adjustments ${debtor.name} and ${creditor.name} are all square. Nothing to pay.`));
+      n.status = "nothing_owed";
+      save(n);
+      closeExpenses(n, "settledIn");
+      return getDB().negotiations.find((x) => x.id === n.id)!;
+    }
     const changed = round2(s0.total - s1.total);
-    const agreeText = await say(
+    const agreeText = await sayChecked(
       debtor,
       creditor,
       `Agree to settle. The final amount is ${money(s1.total)}${changed ? ` (down ${money(changed)} from the opening ${money(s0.total)})` : ""}. ${
-        n.disputes.some((d) => !d.accepted) ? "Accept the declined dispute gracefully." : ""
-      }`,
+        n.disputes.some((d) => !d.accepted) ? "Accept the lines they kept gracefully." : ""
+      } Use no other amounts and don't name individual items.`,
       `Deal. ${money(s1.total)} it is${changed ? `, thanks for taking ${money(changed)} off` : ""}.`,
+      [s1.total, s0.total, changed],
+      n.disputes.map((d) => d.itemLabel),
     );
     push(msg(debtor.id, "AGREE", agreeText, { amount: s1.total, agreementHash: sha256({ lines: s1.lines, total: s1.total }).slice(0, 16) }));
 
     // 6. Guardrails: deterministic rules, not the model, decide whether money can move.
+    if (n.reviewFlag && debtor.paypal.paymentTokenId && process.env.SQUARE_UNLINKED !== "invoice") {
+      n.status = "awaiting_approval";
+      n.approval = { userId: debtor.id, reason: n.reviewFlag };
+      push(msg("square", "ESCALATE", `${n.reviewFlag} ${debtor.name}, please check the lines before anything is paid.`, { amount: s1.total, rule: "consistency" }));
+      return save(n);
+    }
     if (!debtor.paypal.paymentTokenId) {
-      return save(await invoiceInstead(n, debtor, creditor, s1));
+      if (process.env.SQUARE_UNLINKED === "invoice") return save(await invoiceInstead(n, debtor, creditor, s1));
+      // No saved allowance: the human approves this one payment in PayPal checkout.
+      n.status = "awaiting_approval";
+      n.approval = {
+        userId: debtor.id,
+        mode: "checkout",
+        reason: `${n.reviewFlag ? `${n.reviewFlag} ` : ""}${debtor.name} hasn't saved a PayPal allowance, so this payment is approved in PayPal.`,
+      };
+      push(
+        msg(debtor.id, "ESCALATE", `${debtor.name} hasn't given me a standing allowance, so I can't pay on my own. ${debtor.name} will approve this one payment in PayPal.`, {
+          amount: s1.total,
+          rule: "noAllowance",
+        }),
+      );
+      return save(n);
     }
     const weekTotal = sentThisWeek(debtor.id);
     if (weekTotal + s1.total > debtor.policy.weeklyCap) {
@@ -351,29 +551,31 @@ export async function negotiate(): Promise<Negotiation> {
   }
 }
 
-/** Free a settle-up's expenses (it ended without payment), so a new settle-up can include them. */
+/** Free a settle-up's shares (it ended without payment), so a new settle-up can include them. */
 function release(n: Negotiation) {
   mutate((db) => {
-    for (const e of db.expenses) if (e.reservedBy === n.id) e.reservedBy = undefined;
+    for (const c of n.claims) {
+      const e = db.expenses.find((x) => x.id === c.expenseId);
+      if (e?.reservedBy?.[c.user] === n.id) delete e.reservedBy[c.user];
+    }
   });
 }
 
-/** Mark exactly this settle-up's expenses closed, applying its accepted adjustments. */
+/** Mark exactly this settle-up's shares closed, applying its accepted adjustments. */
 function closeExpenses(n: Negotiation, as: "settledIn" | "invoicedIn") {
   mutate((db) => {
-    for (const e of db.expenses) {
-      if (!n.expenseIds.includes(e.id) || e.reservedBy !== n.id) continue;
+    for (const c of n.claims) {
+      const e = db.expenses.find((x) => x.id === c.expenseId);
+      if (!e || e.reservedBy?.[c.user] !== n.id) continue;
       if (as === "settledIn") {
         for (const it of e.items) {
-          const disp = n.disputes.find((x) => x.itemId === it.id && x.accepted);
-          if (disp) it.sharedBy = it.sharedBy.filter((u) => u !== disp.remove);
+          const disp = n.disputes.find((x) => x.itemId === it.id && x.accepted && x.remove === c.user);
+          if (disp && !it.waived?.includes(c.user)) (it.waived ??= []).push(c.user);
         }
+        delete e.reservedBy[c.user];
+        if (e.invoicedIn) delete e.invoicedIn[c.user];
       }
-      e[as] = n.id;
-      if (as === "settledIn") {
-        e.reservedBy = undefined;
-        e.invoicedIn = undefined;
-      }
+      (e[as] ??= {})[c.user] = n.id;
     }
   });
 }
@@ -428,7 +630,7 @@ async function invoiceInstead(n: Negotiation, debtor: User, creditor: User, s: S
 /* ------------------------------------------------------------------ */
 
 /** Statuses that hold the ledger: no new settle-up may start while one of these exists. */
-export const ACTIVE: Negotiation["status"][] = ["negotiating", "awaiting_approval", "settling", "payout_pending", "payout_failed", "unverified", "failed"];
+export const ACTIVE: Negotiation["status"][] = ["negotiating", "awaiting_approval", "awaiting_payer", "settling", "payout_pending", "payout_failed", "unverified", "failed"];
 /** Statuses a retry may resume from. */
 const RESUMABLE: Negotiation["status"][] = ["payout_pending", "payout_failed", "unverified", "failed"];
 const STALE_LOCK_MS = 2 * 60_000;
@@ -455,7 +657,9 @@ function claim(id: string, from: Negotiation["status"][]): Negotiation {
 }
 
 export async function decide(negotiationId: string, decision: "approved" | "declined") {
-  const n = claim(negotiationId, ["awaiting_approval"]);
+  const pre = getDB().negotiations.find((x) => x.id === negotiationId);
+  if (decision === "approved" && pre?.approval?.mode === "checkout") throw new Conflict("This payment is approved in PayPal. Use Pay with PayPal.");
+  const n = claim(negotiationId, ["awaiting_approval", "awaiting_payer"]);
   const human = getDB().users[n.approval!.userId];
   n.approval!.decision = decision;
   n.approval!.decidedAt = now();
@@ -468,6 +672,73 @@ export async function decide(negotiationId: string, decision: "approved" | "decl
   n.messages.push(msg(human.id, "APPROVED", `${human.name} approved ${money(n.agreedAmount)}. Sending it now.`, { approvedBy: human.id }));
   save(n);
   return settleClaimed(n, "human");
+}
+
+/** Checkout mode, step 1: create the order and hand back PayPal's approval link. Nothing is charged yet. */
+export async function startCheckout(negotiationId: string, baseUrl: string) {
+  const n = claim(negotiationId, ["awaiting_approval", "awaiting_payer"]);
+  if (n.approval?.mode !== "checkout") {
+    n.status = "awaiting_approval";
+    save(n);
+    throw new Conflict("This settle-up uses the saved allowance. Use Approve and pay.");
+  }
+  const debtor = getDB().users[n.debtor];
+  const creditor = getDB().users[n.creditor];
+  try {
+    const o = await createCheckoutOrder({
+      amount: n.agreedAmount,
+      description: `Square: ${debtor.name} settling up with ${creditor.name}`,
+      reference: n.id.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 30),
+      requestId: n.payment!.requestId,
+      returnUrl: `${baseUrl}/api/paypal/checkout-return?n=${encodeURIComponent(n.id)}`,
+      cancelUrl: `${baseUrl}/api/paypal/checkout-cancel?n=${encodeURIComponent(n.id)}`,
+    });
+    n.payment!.orderId = o.orderId;
+    n.status = "awaiting_payer";
+    save(n);
+    return o.approveUrl;
+  } catch (e) {
+    n.status = "awaiting_approval";
+    n.messages.push(msg("square", "ERROR", `PayPal couldn't start the payment, so nothing was charged: ${(e as Error).message}`));
+    save(n);
+    throw e;
+  }
+}
+
+/** Checkout mode, step 2: the payer approved in PayPal. Capture once, then pay out, verify and close as usual. */
+export async function finishCheckout(negotiationId: string, orderId: string) {
+  const n = claim(negotiationId, ["awaiting_payer"]);
+  const p = n.payment!;
+  if (!p.orderId || p.orderId !== orderId) {
+    n.status = "awaiting_payer";
+    save(n);
+    throw new Error("That PayPal order doesn't belong to this settle-up.");
+  }
+  const debtor = getDB().users[n.debtor];
+  try {
+    const c = await captureCheckoutOrder(orderId, p.requestId);
+    p.captureId = c.captureId || c.orderId;
+    p.chargedAt = now();
+    n.approval!.decision = "approved";
+    n.approval!.decidedAt = now();
+    n.messages.push(msg(debtor.id, "APPROVED", `${debtor.name} approved ${money(n.agreedAmount)} in PayPal.`, { approvedBy: debtor.id, via: "checkout" }));
+    n.messages.push(msg(debtor.id, "SETTLE", `PayPal captured ${money(n.agreedAmount)} from ${debtor.name}.`, { orderId, captureId: c.captureId, via: "checkout" }));
+    save(n);
+  } catch (e) {
+    n.status = "awaiting_approval";
+    n.messages.push(msg("square", "ERROR", `PayPal didn't complete the payment, so nothing was taken: ${(e as Error).message}`));
+    return save(n);
+  }
+  return settleClaimed(n, "human");
+}
+
+/** The payer cancelled on PayPal's page: nothing was charged, the approval stays open. */
+export function cancelCheckout(negotiationId: string) {
+  return mutate((db) => {
+    const n = db.negotiations.find((x) => x.id === negotiationId);
+    if (n && n.status === "awaiting_payer") n.status = "awaiting_approval";
+    return n;
+  });
 }
 
 /** Retry a settlement that didn't finish. Never charges twice; never pays twice. */
@@ -614,7 +885,7 @@ async function settleClaimed(n: Negotiation, via: "auto" | "human" | "retry" | "
   p.verifiedAt = now();
 
   // 4. Only now: signed receipt, close the ledger, make accepted adjustments permanent.
-  const covered = getDB().expenses.filter((e) => n.expenseIds.includes(e.id));
+  const covered = getDB().expenses.filter((e) => n.claims.some((c) => c.expenseId === e.id));
   const ledgerHash = sha256(covered).slice(0, 16);
   const agreementHash = sha256({ id: n.id, amount: n.agreedAmount, disputes: n.disputes }).slice(0, 16);
   const receiptBody = { id: uid("rcpt"), ledgerHash, agreementHash, paymentRef: p.orderId!, issuedAt: now() };
@@ -633,7 +904,7 @@ async function settleClaimed(n: Negotiation, via: "auto" | "human" | "retry" | "
   };
   n.status = "settled";
   p.settlingSince = undefined;
-  // Close exactly the expenses this settle-up was negotiated over; anything added since stays open.
+  // Close exactly the shares this settle-up was negotiated over; anything added since stays open.
   closeExpenses(n, "settledIn");
   return save(n);
 }

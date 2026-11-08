@@ -6,6 +6,8 @@ You and your friends each have an agent. Your agent keeps track of what you pay 
 
 Nobody has to send the "hey, you still owe me for the Airbnb" text again.
 
+Square works across all your groups. The demo has four friends in three groups: a **Lisbon trip** (all four), **Apartment 4B** (Maya and Priya are roommates) and **Friday lunches** (Alex and Sam from work). Every settle-up is between two people's agents, directly, on PayPal, and it covers **every group those two share in one payment**: Priya pays Maya once for the trip and the apartment bills, instead of once per group.
+
 > PayPal has said it expects agentic commerce to extend from shopping to peer-to-peer transfers. Square is a prototype of that: agent-to-agent P2P settlement, with PayPal moving the money and Square holding the agents to their humans' rules.
 
 ---
@@ -26,7 +28,8 @@ With no credentials, Square runs in **demo mode**: the full flow works and PayPa
 
 ### The 60-second walkthrough
 
-1. On **Alex's phone**, open **Rules** and tap **Connect PayPal**. Approve the one-time agent allowance in PayPal (sandbox login).
+0. The home screen shows each friend's position and every pair that still owes money, across **All groups** or inside one group (tabs at the top). Combined rows show what each group contributes, e.g. Alex owes Sam $60 for surfing but Sam owes Alex $23 for lunches, so Alex pays $37 once. Tap a person to see their balance with each friend, then tap **Alex owes Maya** to open their two phones. (Deep link: `/?pair=alex,maya`. **Whole group** takes you back.)
+1. Optional: on **Alex's phone**, open **Rules** and tap **Connect PayPal** to approve a standing agent allowance (PayPal Vault). Without it, everything still works: Alex approves each payment in PayPal instead (step 4).
 2. Tap **Let our agents settle up** in the middle column.
 3. Watch the agents' conversation print on the receipt tape:
    - **Handshake:** each agent presents a Square-issued credential, linked to the PayPal allowance its human approved and to a hash of its human's rules.
@@ -37,9 +40,13 @@ With no credentials, Square runs in **demo mode**: the full flow works and PayPa
    - **Needs approval:** $241 is above Alex's $150 auto-approve limit, so his agent asks him.
 4. Tap **Approve and pay** on Alex's phone. Square charges Alex's vaulted PayPal allowance, pays Maya with PayPal Payouts, and checks the order on PayPal itself; Maya's agent looks it up through the PayPal Agent Toolkit. Only when the charge, the payout and the check all succeed is the trip marked settled, with a signed receipt.
 5. Tell Maya's agent "I paid $30 for tapas" and settle again: $15 is under Alex's limit, so the agents finish without asking anyone.
-6. Reset, skip step 1, and settle: Alex has no allowance, so Maya's agent sends him an itemized **PayPal invoice** instead. Those lines stay on hold until PayPal reports the invoice paid.
+6. Without a saved allowance, the approval card shows **Pay with PayPal**: Alex approves that one payment in PayPal checkout, and when he returns Square captures it once, pays Maya, verifies and settles. (Set `SQUARE_UNLINKED=invoice` to send an itemized **PayPal invoice** instead; those lines stay on hold until PayPal reports it paid.)
 
-Presenting live or recording? Open `/?present=1`: the tape then advances one message per press of the → key.
+Try another pair too: **Priya owes Maya** $99: $28 from the Lisbon trip and $71 in apartment bills. The statement lists both groups. Priya's agent knows she doesn't drink and disputes her share of the trip's sangria and of the housewarming wine; Maya's agent accepts, so Priya pays $71 in one PayPal payment. Only Priya's shares are waived: Sam still owes his share of the sangria, and settling one pair never touches what someone owes anyone else.
+
+New expenses go in the right group: "I paid $90 for the water bill" between Maya and Priya is filed under Apartment 4B; if you're looking at a group when you add it, that group is used when it fits.
+
+Presenting live or recording? Open `/?present=1&pair=alex,maya`: the tape then advances one message per press of the → key.
 
 Tip: with an AI model enabled, edit either person's rules or memory in the **Rules** tab and watch the agents negotiate differently. For example, set Maya's rule to "split everything 50/50, drinks included" and the wine dispute is declined. (Built-in rules mode only follows the default rules.)
 
@@ -51,6 +58,7 @@ Tip: with an AI model enabled, edit either person's rules or memory in the **Rul
 |---|---|
 | **Vault v3: setup tokens + payment tokens** (save without purchase) | Each human approves an "agent allowance" once. The resulting payment token is what lets their agent pay later without them present. PayPal returns the payer ID with it, which Square puts (masked) on the agent's credential. |
 | **Orders v2 with `vault_id`** | The debtor's agent charges its human's allowance for exactly the agreed amount. |
+| **Orders v2 checkout** | When there's no saved allowance, the human approves the agreed amount in PayPal; Square captures it once on return (idempotent create and capture). |
 | **Payouts v1** | Square forwards the money to the friend's PayPal account. |
 | **PayPal Agent Toolkit** (`@paypal/agent-toolkit`) | Exposed to the AI model as tools. The creditor's agent calls `get_order` itself to verify the payment instead of trusting the other agent. When the friend has no allowance, the agent uses `create_invoice` and `send_invoice` to send an itemized PayPal invoice. |
 | **Invoicing v2** (through the toolkit) | Fallback settlement path, itemized line by line with the agreed adjustments. |
@@ -60,10 +68,11 @@ All in the free PayPal **sandbox**.
 
 ## How it uses AI
 
-Agents are powered by **OpenAI** (Chat Completions, `gpt-5-mini` by default) or **Claude** (Anthropic Messages API, `claude-sonnet-5-5`). Square uses whichever key you set: `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` (Claude wins if both are set). Override the model with `OPENAI_MODEL` or `ANTHROPIC_MODEL`.
+Agents are powered by **OpenAI** (Chat Completions, `gpt-4.1-mini` by default) or **Claude** (Anthropic Messages API, `claude-sonnet-5-5`). Square uses whichever key you set: `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` (Claude wins if both are set). Override the model with `OPENAI_MODEL` or `ANTHROPIC_MODEL`.
 
-- **Expense capture:** "Maya paid $40 for the museum" or a **receipt photo** (read by the model's vision) becomes itemized ledger lines, each tagged as consumable or a shared booking, so lines can be disputed individually.
+- **Expense capture:** "Maya paid $40 for the museum", "I paid $60 for dinner for everyone" or a **receipt photo** (read by the model's vision) becomes itemized ledger lines, each tagged as consumable or a shared booking, so lines can be disputed individually.
 - **Negotiation:** each agent gets a persona built from its own human's instructions and memory. The debtor's agent reviews the statement line by line and raises disputes with reasons. The creditor's agent rules on each one under its human's rules. Both write their own messages.
+- **Words match money.** Each ruling returns a structured decision per line ("remove" or "keep") and the amount is computed only from those decisions. Before anything is shown, a separate model call reads each explanation and reports what it says; if it contradicts the decision, the agent is asked once more. If it still contradicts, Square replaces the explanation with wording generated from the decision, marks it on the tape, and the payment waits for the human even under the auto-approve limit. Agent messages that quote an amount Square didn't compute are replaced with Square's own wording. `npm test` covers this with a scripted model that contradicts itself.
 - **Verification with tools:** the creditor's agent runs a tool-use loop over PayPal Agent Toolkit tools to look up the order and report what it found. Whether the payment counts as verified is decided in code (status, capture and amount), not by the model.
 
 **What the model is not allowed to do:** compute money or decide whether money moves. Amounts are recomputed deterministically from the ledger and the accepted disputes (`lib/ledger.ts`). Spending limits and weekly caps are enforced in code (`lib/agents.ts`), not in the prompt. A prompt-injected agent can argue, but it can't overspend.
@@ -109,6 +118,7 @@ app/
     retry                   resume a settlement that didn't finish
     health                  public liveness check (no data)
     paypal/connect|return   Vault setup token -> PayPal approval -> payment token
+    checkout, paypal/checkout-return|cancel   one-time PayPal approval when there's no allowance
     webhooks/paypal         verified PayPal events
     policy, state, reset
 lib/
@@ -131,7 +141,7 @@ Money flow in sandbox: the debtor's allowance is charged to the app's sandbox **
 ## Set up the PayPal sandbox
 
 1. At [developer.paypal.com](https://developer.paypal.com), create a sandbox app. Under its features, make sure **Vault** and **Payouts** are enabled.
-2. Under **Sandbox accounts**, note two personal accounts (one for Alex, one for Maya). You'll log in as Alex's account when you click **Connect PayPal**.
+2. Under **Sandbox accounts**, note two personal accounts (one for Alex, one for Maya). Add `SAM_SANDBOX_EMAIL` and `PRIYA_SANDBOX_EMAIL` too if you want payouts to Sam and Priya to reach real sandbox accounts. You'll log in as Alex's account when you click **Connect PayPal**.
 3. Copy `.env.example` to `.env` and fill in `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `ALEX_SANDBOX_EMAIL`, `MAYA_SANDBOX_EMAIL`, and optionally `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`).
 4. Optional: add a webhook pointing at `https://<your-host>/api/webhooks/paypal` and put its ID in `PAYPAL_WEBHOOK_ID`.
 5. `npm run dev`.
