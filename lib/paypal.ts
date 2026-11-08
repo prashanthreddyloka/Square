@@ -126,7 +126,25 @@ export function demoHooks(): DemoHooks {
  * Charge a vaulted allowance. `requestId` is sent as PayPal-Request-Id, so retrying the
  * same settlement returns the original order instead of charging the payer twice.
  */
-export async function chargeAllowance(opts: { vaultId: string; amount: number; description: string; reference: string; requestId: string }) {
+/**
+ * How the friend gets paid. "direct" (default): the friend is the payee on the PayPal order, so
+ * PayPal moves the money straight from one person to the other and Square never holds it.
+ * "payouts": Square's account receives the charge and sends it on with PayPal Payouts.
+ */
+export const paymentRoute = (): "direct" | "payouts" => (process.env.SQUARE_PAYMENT === "payouts" ? "payouts" : "direct");
+
+/** PayPal refused to name this payee (account type, country or permissions), as opposed to a failed payment. */
+export const isPayeeRefusal = (e: unknown) => /PAYEE|payee|RECEIVER|receiver/.test((e as Error)?.message || "") && /\((400|403|422)\)/.test((e as Error)?.message || "");
+
+const unit = (o: { reference: string; description: string; amount: number; payeeEmail?: string }) => ({
+  reference_id: o.reference,
+  custom_id: o.reference,
+  description: o.description.slice(0, 127),
+  amount: { currency_code: "USD", value: o.amount.toFixed(2) },
+  ...(o.payeeEmail ? { payee: { email_address: o.payeeEmail } } : {}),
+});
+
+export async function chargeAllowance(opts: { vaultId: string; amount: number; description: string; reference: string; requestId: string; payeeEmail?: string }) {
   if (paypalMode() === "demo") {
     const h = demoHooks();
     if (!h.charges.has(opts.requestId)) h.charges.set(opts.requestId, uid("DEMO-ORDER").toUpperCase());
@@ -144,14 +162,7 @@ export async function chargeAllowance(opts: { vaultId: string; amount: number; d
     {
       intent: "CAPTURE",
       payment_source: { paypal: { vault_id: opts.vaultId } },
-      purchase_units: [
-        {
-          reference_id: opts.reference,
-          custom_id: opts.reference,
-          description: opts.description.slice(0, 127),
-          amount: { currency_code: "USD", value: opts.amount.toFixed(2) },
-        },
-      ],
+      purchase_units: [unit(opts)],
     },
     { "PayPal-Request-Id": opts.requestId },
   );
@@ -177,6 +188,7 @@ export async function createCheckoutOrder(opts: {
   requestId: string;
   returnUrl: string;
   cancelUrl: string;
+  payeeEmail?: string;
 }) {
   if (paypalMode() === "demo") {
     const orderId = `DEMO-ORDER-${opts.requestId.replace(/[^A-Za-z0-9]/g, "").slice(-10).toUpperCase()}`;
@@ -187,14 +199,7 @@ export async function createCheckoutOrder(opts: {
     "/v2/checkout/orders",
     {
       intent: "CAPTURE",
-      purchase_units: [
-        {
-          reference_id: opts.reference,
-          custom_id: opts.reference,
-          description: opts.description.slice(0, 127),
-          amount: { currency_code: "USD", value: opts.amount.toFixed(2) },
-        },
-      ],
+      purchase_units: [unit(opts)],
       payment_source: {
         paypal: {
           experience_context: {
@@ -297,19 +302,22 @@ export async function payoutStatus(batchId: string, waitMs = 6000): Promise<{ it
 }
 
 /** Independent check of an order: completed, captured, and for the agreed amount. */
-export async function verifyOrder(orderId: string, amount: number) {
+/** Read the order back from PayPal. With `payeeEmail`, the money must also have gone to that person. */
+export async function verifyOrder(orderId: string, amount: number, payeeEmail?: string) {
   if (paypalMode() === "demo" || orderId.startsWith("DEMO")) {
-    return { ok: true, status: "COMPLETED", amount: amount.toFixed(2) };
+    return { ok: true, status: "COMPLETED", amount: amount.toFixed(2), payee: payeeEmail };
   }
   const o = await pp<{
     status: string;
-    purchase_units?: { amount?: { value: string }; payments?: { captures?: { status: string; amount?: { value: string } }[] } }[];
+    purchase_units?: { amount?: { value: string }; payee?: { email_address?: string }; payments?: { captures?: { status: string; amount?: { value: string } }[] } }[];
   }>("GET", `/v2/checkout/orders/${orderId}`);
   const pu = o.purchase_units?.[0];
   const cap = pu?.payments?.captures?.[0];
   const value = cap?.amount?.value || pu?.amount?.value || "";
-  const ok = o.status === "COMPLETED" && cap?.status === "COMPLETED" && Number(value) === Number(amount.toFixed(2));
-  return { ok, status: `${o.status}${cap ? `/${cap.status}` : ""}`, amount: value };
+  const payee = pu?.payee?.email_address;
+  const payeeOk = !payeeEmail || (payee || "").toLowerCase() === payeeEmail.toLowerCase();
+  const ok = o.status === "COMPLETED" && cap?.status === "COMPLETED" && Number(value) === Number(amount.toFixed(2)) && payeeOk;
+  return { ok, status: `${o.status}${cap ? `/${cap.status}` : ""}`, amount: value, payee };
 }
 
 /* ---------- Webhooks ---------- */

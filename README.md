@@ -38,7 +38,7 @@ With no credentials, Square runs in **demo mode**: the full flow works and PayPa
    - **Ruling:** Maya's agent follows Maya's rules: drop things he didn't have (wine), keep shared bookings (tickets).
    - **Agreement:** $241, recomputed by Square, never by the model.
    - **Needs approval:** $241 is above Alex's $150 auto-approve limit, so his agent asks him.
-4. Tap **Approve and pay** on Alex's phone. Square charges Alex's vaulted PayPal allowance, pays Maya with PayPal Payouts, and checks the order on PayPal itself; Maya's agent looks it up through the PayPal Agent Toolkit. Only when the charge, the payout and the check all succeed is the trip marked settled, with a signed receipt.
+4. Tap **Approve and pay** on Alex's phone. Square charges Alex's vaulted PayPal allowance with Maya as the payee, so PayPal moves the money straight from Alex to Maya and Square never holds it. Maya's agent then checks the order on PayPal itself, through the PayPal Agent Toolkit: completed, for the agreed amount, paid to Maya. Only then is the trip marked settled, with a signed receipt.
 5. Tell Maya's agent "I paid $30 for tapas" and settle again: $15 is under Alex's limit, so the agents finish without asking anyone.
 6. Without a saved allowance, the approval card shows **Pay with PayPal**: Alex approves that one payment in PayPal checkout, and when he returns Square captures it once, pays Maya, verifies and settles. (Set `SQUARE_UNLINKED=invoice` to send an itemized **PayPal invoice** instead; those lines stay on hold until PayPal reports it paid.)
 
@@ -59,7 +59,7 @@ Tip: with an AI model enabled, edit either person's rules or memory in the **Rul
 | **Vault v3: setup tokens + payment tokens** (save without purchase) | Each human approves an "agent allowance" once. The resulting payment token is what lets their agent pay later without them present. PayPal returns the payer ID with it, which Square puts (masked) on the agent's credential. |
 | **Orders v2 with `vault_id`** | The debtor's agent charges its human's allowance for exactly the agreed amount. |
 | **Orders v2 checkout** | When there's no saved allowance, the human approves the agreed amount in PayPal; Square captures it once on return (idempotent create and capture). |
-| **Payouts v1** | Square forwards the money to the friend's PayPal account. |
+| **Payouts v1** | Optional route (`SQUARE_PAYMENT=payouts`): Square's account receives the charge and forwards it to the friend. Used automatically if PayPal refuses to name the friend as payee. |
 | **PayPal Agent Toolkit** (`@paypal/agent-toolkit`) | Exposed to the AI model as tools. The creditor's agent calls `get_order` itself to verify the payment instead of trusting the other agent. When the friend has no allowance, the agent uses `create_invoice` and `send_invoice` to send an itemized PayPal invoice. |
 | **Invoicing v2** (through the toolkit) | Fallback settlement path, itemized line by line with the agreed adjustments. |
 | **Webhooks** (`/api/webhooks/paypal`) | Signature-verified payout and invoice events finish settlements that were waiting on PayPal. Unverified events are logged and ignored. |
@@ -136,11 +136,11 @@ scripts/live-check.ts       live check against the PayPal sandbox and the AI mod
 
 State lives in `data/db.json` (a single file, fine for a demo; swap for a database in production). On the hosted demo everyone shares one trip, so press **Reset the trip** if someone else left it mid-way.
 
-Money flow in sandbox: the debtor's allowance is charged to the app's sandbox **business** account, which then pays the friend with Payouts. Keep some sandbox balance on that business account (new sandbox business accounts start with a balance).
+Money flow in sandbox: by default the friend is the **payee** on the PayPal order, so the money goes straight from one personal sandbox account to the other. With `SQUARE_PAYMENT=payouts`, the app's sandbox business account receives it and forwards it with Payouts (that needs Payouts enabled, and a business account in a country allowed to send them).
 
 ## Set up the PayPal sandbox
 
-1. At [developer.paypal.com](https://developer.paypal.com), create a sandbox app. Under its features, make sure **Vault** and **Payouts** are enabled.
+1. At [developer.paypal.com](https://developer.paypal.com), create a sandbox app. Under its features, make sure **Vault** is enabled (and **Payouts**, if you use `SQUARE_PAYMENT=payouts`).
 2. Under **Sandbox accounts**, note two personal accounts (one for Alex, one for Maya). Add `SAM_SANDBOX_EMAIL` and `PRIYA_SANDBOX_EMAIL` too if you want payouts to Sam and Priya to reach real sandbox accounts. You'll log in as Alex's account when you click **Connect PayPal**.
 3. Copy `.env.example` to `.env` and fill in `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `ALEX_SANDBOX_EMAIL`, `MAYA_SANDBOX_EMAIL`, and optionally `OPENAI_API_KEY` (or `ANTHROPIC_API_KEY`).
 4. Optional: add a webhook pointing at `https://<your-host>/api/webhooks/paypal` and put its ID in `PAYPAL_WEBHOOK_ID`.

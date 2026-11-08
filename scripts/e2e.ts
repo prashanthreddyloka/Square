@@ -46,6 +46,9 @@ async function fresh() {
 }
 
 async function main() {
+  // Most checks below exercise the Payouts route (Square receives, then pays the friend), which has
+  // the most failure states. The direct route is checked separately at the end.
+  process.env.SQUARE_PAYMENT = "payouts";
   if (paypalMode() !== "demo") {
     console.log("PayPal credentials are set; this suite is for demo mode. Use `npm run test:live`.");
     return;
@@ -328,6 +331,21 @@ async function main() {
   const c4 = await negotiate("alex", "maya");
   assert(c4.agreedAmount === 253 && c4.reviewFlag && c4.status === "awaiting_approval", "an unreadable decision changes nothing and goes to the human");
   scriptModel(null);
+
+  console.log("\nDirect payment: the friend is the payee, no payout step");
+  delete process.env.SQUARE_PAYMENT;
+  await fresh();
+  mutate((d) => (d.users.alex.policy.autoApproveMax = 500));
+  const dir = await negotiate("alex", "maya");
+  assert(dir.status === "settled" && dir.agreedAmount === 241 && charges() === 1, "settled with one charge");
+  assert(dir.payment!.direct && dir.payment!.payouts.length === 0 && demoHooks().payouts.size === 0, "PayPal paid Maya directly: no payout was sent");
+  assert(dir.messages.some((m) => m.type === "SETTLE" && /straight to Maya/.test(m.text)), "the tape says the money went straight to Maya");
+  resetDB(false);
+  demoHooks().charges.clear();
+  const dco = await negotiate("alex", "maya");
+  const durl = await startCheckout(dco.id, "http://localhost:3000");
+  const ddone = await finishCheckout(dco.id, new URL(durl).searchParams.get("token")!);
+  assert(ddone.status === "settled" && ddone.payment!.direct && ddone.payment!.payouts.length === 0, "checkout pays Maya directly too");
 
   console.log(failures ? `\n${failures} check(s) failed.` : "\nAll checks passed.");
   process.exit(failures ? 1 : 0);

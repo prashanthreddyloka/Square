@@ -127,6 +127,7 @@ export interface Receipt {
 /** Every step of a settlement is saved as it happens, so a retry resumes instead of repeating. */
 export interface PaymentProgress {
   requestId: string; // PayPal-Request-Id for the charge: retries return the same order
+  direct?: boolean; // the friend was the payee on the order: PayPal paid them directly, no payout step
   orderId?: string;
   captureId?: string;
   chargedAt?: string;

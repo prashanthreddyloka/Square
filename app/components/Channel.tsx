@@ -202,7 +202,7 @@ function Entry({ m, state, align, name, color }: { m: AgentMessage; state: AppSt
 
       {m.type === "SETTLE" && (
         <div className="ids">
-          {d.orderId ? `PayPal order ${d.orderId}; capture ${d.captureId}` : `PayPal payout batch ${d.payoutBatchId} (${String(d.payoutStatus || "").toLowerCase()})`}
+          {d.orderId ? `PayPal order ${d.orderId}; capture ${d.captureId}${d.payee ? `; paid to ${d.payee}` : ""}` : `PayPal payout batch ${d.payoutBatchId} (${String(d.payoutStatus || "").toLowerCase()})`}
         </div>
       )}
 

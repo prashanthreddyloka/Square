@@ -1,6 +1,6 @@
 import { aiMode, ask, askJSON, askWithTools, imageBlock } from "./ai";
 import { buildStatement, freeShare, money, pairKey, round2, type ShareFilter } from "./ledger";
-import { captureCheckoutOrder, chargeAllowance, createCheckoutOrder, createPayout, payoutStatus, paypalMode, verifyOrder } from "./paypal";
+import { captureCheckoutOrder, chargeAllowance, createCheckoutOrder, createPayout, isPayeeRefusal, paymentRoute, payoutStatus, paypalMode, verifyOrder } from "./paypal";
 import { getDB, mutate, uid } from "./store";
 import { claudeTools, runTool, sendFriendInvoice } from "./toolkit";
 import { checkTrustCard, issueTrustCard, sha256, sign, signMessage } from "./trust";
@@ -685,14 +685,24 @@ export async function startCheckout(negotiationId: string, baseUrl: string) {
   const debtor = getDB().users[n.debtor];
   const creditor = getDB().users[n.creditor];
   try {
-    const o = await createCheckoutOrder({
+    const base = {
       amount: n.agreedAmount,
       description: `Square: ${debtor.name} settling up with ${creditor.name}`,
       reference: n.id.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 30),
-      requestId: n.payment!.requestId,
       returnUrl: `${baseUrl}/api/paypal/checkout-return?n=${encodeURIComponent(n.id)}`,
       cancelUrl: `${baseUrl}/api/paypal/checkout-cancel?n=${encodeURIComponent(n.id)}`,
-    });
+    };
+    let direct = n.payment!.direct ?? paymentRoute() === "direct";
+    let o;
+    try {
+      o = await createCheckoutOrder({ ...base, requestId: direct ? n.payment!.requestId : `${n.payment!.requestId}-platform`, payeeEmail: direct ? payeeOf(creditor) : undefined });
+    } catch (e) {
+      // Creating an order moves no money, so falling back to Square-as-payee here is always safe.
+      if (!direct || !isPayeeRefusal(e)) throw e;
+      direct = false;
+      o = await createCheckoutOrder({ ...base, requestId: `${n.payment!.requestId}-platform` });
+    }
+    n.payment!.direct = direct;
     n.payment!.orderId = o.orderId;
     n.status = "awaiting_payer";
     save(n);
@@ -722,7 +732,17 @@ export async function finishCheckout(negotiationId: string, orderId: string) {
     n.approval!.decision = "approved";
     n.approval!.decidedAt = now();
     n.messages.push(msg(debtor.id, "APPROVED", `${debtor.name} approved ${money(n.agreedAmount)} in PayPal.`, { approvedBy: debtor.id, via: "checkout" }));
-    n.messages.push(msg(debtor.id, "SETTLE", `PayPal captured ${money(n.agreedAmount)} from ${debtor.name}.`, { orderId, captureId: c.captureId, via: "checkout" }));
+    const creditor = getDB().users[n.creditor];
+    n.messages.push(
+      msg(
+        debtor.id,
+        "SETTLE",
+        p.direct
+          ? `PayPal captured ${money(n.agreedAmount)} from ${debtor.name} and paid it straight to ${creditor.name}. Square never held it.`
+          : `PayPal captured ${money(n.agreedAmount)} from ${debtor.name}.`,
+        { orderId, captureId: c.captureId, via: "checkout", direct: p.direct },
+      ),
+    );
     save(n);
   } catch (e) {
     n.status = "awaiting_approval";
@@ -773,6 +793,9 @@ export async function onPayoutEvent(batchId: string) {
  *   charge (idempotent) -> payout (one live attempt at a time) -> independent verification -> close ledger.
  * The ledger closes only when PayPal confirms both the capture and the payout.
  */
+/** Where the creditor is paid: the PayPal email they connected, or their sandbox account. */
+const payeeOf = (u: User) => u.paypal.payerEmail || u.sandboxEmail;
+
 async function settleClaimed(n: Negotiation, via: "auto" | "human" | "retry" | "webhook"): Promise<Negotiation> {
   const db = getDB();
   const debtor = db.users[n.debtor];
@@ -784,19 +807,31 @@ async function settleClaimed(n: Negotiation, via: "auto" | "human" | "retry" | "
   if (!p.captureId) {
     try {
       if (!debtor.paypal.paymentTokenId) throw new Error(`${debtor.name} has no approved PayPal allowance.`);
-      const order = await chargeAllowance({
-        vaultId: debtor.paypal.paymentTokenId,
-        amount: n.agreedAmount,
-        description: `Square: ${debtor.name} settling up with ${creditor.name}`,
-        reference,
-        requestId: p.requestId,
-      });
+      const charge = { vaultId: debtor.paypal.paymentTokenId, amount: n.agreedAmount, description: `Square: ${debtor.name} settling up with ${creditor.name}`, reference };
+      p.direct ??= paymentRoute() === "direct";
+      let order;
+      try {
+        order = await chargeAllowance({ ...charge, requestId: p.direct ? p.requestId : `${p.requestId}-platform`, payeeEmail: p.direct ? payeeOf(creditor) : undefined });
+      } catch (e) {
+        // PayPal refused the payee itself (a 4xx naming it), so nothing was charged: pay via Square and Payouts instead.
+        if (!p.direct || !isPayeeRefusal(e)) throw e;
+        p.direct = false;
+        save(n);
+        order = await chargeAllowance({ ...charge, requestId: `${p.requestId}-platform` });
+      }
       p.orderId = order.orderId;
       p.captureId = order.captureId || order.orderId;
       p.chargedAt = now();
       p.lastError = undefined;
       n.messages.push(
-        msg(debtor.id, "SETTLE", `Charged ${money(n.agreedAmount)} to ${debtor.name}'s PayPal allowance.`, { orderId: order.orderId, captureId: order.captureId, via }),
+        msg(
+          debtor.id,
+          "SETTLE",
+          p.direct
+            ? `Paid ${money(n.agreedAmount)} from ${debtor.name}'s PayPal allowance straight to ${creditor.name}. PayPal moved it person to person; Square never held it.`
+            : `Charged ${money(n.agreedAmount)} to ${debtor.name}'s PayPal allowance.`,
+          { orderId: order.orderId, captureId: order.captureId, via, direct: p.direct, payee: p.direct ? maskEmail(payeeOf(creditor)) : undefined },
+        ),
       );
       save(n);
     } catch (e) {
@@ -810,6 +845,7 @@ async function settleClaimed(n: Negotiation, via: "auto" | "human" | "retry" | "
   // 2. Pay the friend. Every attempt is recorded *before* it is sent, and its batch ID is saved the
   //    moment PayPal returns it, so a crash or a failed status lookup never loses the reference.
   //    A new attempt starts only after the previous one is confirmed failed.
+  if (!p.direct) {
   const note = `${debtor.name}'s agent settled up with you on Square.${n.disputes.length ? ` Adjusted: ${n.disputes.map((d) => `${d.itemLabel} (${d.accepted ? "removed" : "kept"})`).join(", ")}.` : ""}`;
   try {
     let last = p.payouts.at(-1);
@@ -873,9 +909,11 @@ async function settleClaimed(n: Negotiation, via: "auto" | "human" | "retry" | "
   }
   const payout = p.payouts.at(-1)!;
   n.messages.push(msg(debtor.id, "SETTLE", `Sent ${money(n.agreedAmount)} to ${creditor.name} with PayPal Payouts.`, { payoutBatchId: payout.batchId, payoutStatus: payout.status }));
+  }
 
-  // 3. The creditor's agent checks PayPal itself. Code decides; the agent explains.
-  const check = await verifyOrder(p.orderId!, n.agreedAmount).catch((e) => ({ ok: false, status: String((e as Error).message), amount: "" }));
+  // 3. The creditor's agent checks PayPal itself: the order is complete, for the agreed amount,
+  //    and (when paid directly) the money went to the creditor. Code decides; the agent explains.
+  const check = await verifyOrder(p.orderId!, n.agreedAmount, p.direct ? payeeOf(creditor) : undefined).catch((e) => ({ ok: false, status: String((e as Error).message), amount: "" }));
   const confirmation = await confirmOnPayPal(creditor, debtor, p.orderId!, n.agreedAmount, check.ok);
   n.messages.push(msg(creditor.id, "CONFIRM", confirmation.text, { verified: check.ok, orderStatus: check.status, amount: check.amount, toolCalls: confirmation.calls }));
   if (!check.ok) {
@@ -894,9 +932,9 @@ async function settleClaimed(n: Negotiation, via: "auto" | "human" | "retry" | "
     orderId: p.orderId!,
     orderStatus: check.status,
     captureId: p.captureId,
-    payoutBatchId: payout.batchId,
-    payoutItemId: payout.itemId,
-    payoutStatus: payout.status,
+    payoutBatchId: p.payouts.at(-1)?.batchId,
+    payoutItemId: p.payouts.at(-1)?.itemId,
+    payoutStatus: p.direct ? "PAID_DIRECTLY" : p.payouts.at(-1)?.status,
     amount: n.agreedAmount,
     currency: "USD",
     settledAt: now(),
