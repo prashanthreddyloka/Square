@@ -340,6 +340,15 @@ async function main() {
   assert(dir.status === "settled" && dir.agreedAmount === 241 && charges() === 1, "settled with one charge");
   assert(dir.payment!.direct && dir.payment!.payouts.length === 0 && demoHooks().payouts.size === 0, "PayPal paid Maya directly: no payout was sent");
   assert(dir.messages.some((m) => m.type === "SETTLE" && /straight to Maya/.test(m.text)), "the tape says the money went straight to Maya");
+  await fresh();
+  mutate((d) => (d.users.alex.policy.autoApproveMax = 500));
+  demoHooks().refuseDirectAllowance = true;
+  const ref = await negotiate("alex", "maya");
+  assert(ref.status === "awaiting_approval" && ref.approval?.mode === "checkout" && charges() === 0, "if PayPal won't send a saved allowance straight to Maya, nothing is charged and Alex approves in PayPal");
+  const rurl = await startCheckout(ref.id, "http://localhost:3000");
+  const rdone = await finishCheckout(ref.id, new URL(rurl).searchParams.get("token")!);
+  assert(rdone.status === "settled" && rdone.payment!.direct && charges() === 1, "then it settles directly, charged once");
+  demoHooks().refuseDirectAllowance = false;
   resetDB(false);
   demoHooks().charges.clear();
   const dco = await negotiate("alex", "maya");

@@ -2,6 +2,8 @@
 
 **Personal AI agents that settle up between friends, on PayPal.**
 
+**Demo video (2:46):** https://youtu.be/0urWVmtu_Gw · **Live app:** https://square-gink.onrender.com
+
 You and your friends each have an agent. Your agent keeps track of what you pay for. When it's time to settle, your agent and your friend's agent talk to each other: they show each other credentials tied to their humans' PayPal allowances, check every line of the bill against what they know about their humans, dispute what's unfair, agree on a number, and move the money through PayPal. You only get asked when one of your own rules says so.
 
 Nobody has to send the "hey, you still owe me for the Airbnb" text again.
@@ -38,7 +40,7 @@ With no credentials, Square runs in **demo mode**: the full flow works and PayPa
    - **Ruling:** Maya's agent follows Maya's rules: drop things he didn't have (wine), keep shared bookings (tickets).
    - **Agreement:** $241, recomputed by Square, never by the model.
    - **Needs approval:** $241 is above Alex's $150 auto-approve limit, so his agent asks him.
-4. Tap **Approve and pay** on Alex's phone. Square charges Alex's vaulted PayPal allowance with Maya as the payee, so PayPal moves the money straight from Alex to Maya and Square never holds it. Maya's agent then checks the order on PayPal itself, through the PayPal Agent Toolkit: completed, for the agreed amount, paid to Maya. Only then is the trip marked settled, with a signed receipt.
+4. Tap **Approve and pay** on Alex's phone. Square charges Alex with Maya as the payee, so PayPal moves the money straight from Alex to Maya and Square never holds it. (Without a saved allowance, or if PayPal won't send a saved allowance straight to a friend, Alex approves this one payment on PayPal's own page instead, still paid directly to Maya.) Maya's agent then checks the order on PayPal itself, through the PayPal Agent Toolkit: completed, for the agreed amount, paid to Maya. Only then is the trip marked settled, with a signed receipt.
 5. Tell Maya's agent "I paid $30 for tapas" and settle again: $15 is under Alex's limit, so the agents finish without asking anyone.
 6. Without a saved allowance, the approval card shows **Pay with PayPal**: Alex approves that one payment in PayPal checkout, and when he returns Square captures it once, pays Maya, verifies and settles. (Set `SQUARE_UNLINKED=invoice` to send an itemized **PayPal invoice** instead; those lines stay on hold until PayPal reports it paid.)
 

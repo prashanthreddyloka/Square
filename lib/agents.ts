@@ -695,7 +695,8 @@ export async function startCheckout(negotiationId: string, baseUrl: string) {
     let direct = n.payment!.direct ?? paymentRoute() === "direct";
     let o;
     try {
-      o = await createCheckoutOrder({ ...base, requestId: direct ? n.payment!.requestId : `${n.payment!.requestId}-platform`, payeeEmail: direct ? payeeOf(creditor) : undefined });
+      // Its own request ID, separate from any earlier allowance attempt, so PayPal never replays that response.
+      o = await createCheckoutOrder({ ...base, requestId: direct ? `${n.payment!.requestId}-co` : `${n.payment!.requestId}-platform`, payeeEmail: direct ? payeeOf(creditor) : undefined });
     } catch (e) {
       // Creating an order moves no money, so falling back to Square-as-payee here is always safe.
       if (!direct || !isPayeeRefusal(e)) throw e;
@@ -813,11 +814,23 @@ async function settleClaimed(n: Negotiation, via: "auto" | "human" | "retry" | "
       try {
         order = await chargeAllowance({ ...charge, requestId: p.direct ? p.requestId : `${p.requestId}-platform`, payeeEmail: p.direct ? payeeOf(creditor) : undefined });
       } catch (e) {
-        // PayPal refused the payee itself (a 4xx naming it), so nothing was charged: pay via Square and Payouts instead.
         if (!p.direct || !isPayeeRefusal(e)) throw e;
-        p.direct = false;
-        save(n);
-        order = await chargeAllowance({ ...charge, requestId: `${p.requestId}-platform` });
+        // PayPal won't charge a saved allowance straight to a friend (nothing was charged). Keep the
+        // money person to person: ask the debtor to approve this one payment in PayPal instead.
+        n.status = "awaiting_approval";
+        n.approval = {
+          userId: debtor.id,
+          reason: `PayPal can't send ${debtor.name}'s saved allowance straight to ${creditor.name}, so ${debtor.name} approves this one payment in PayPal.`,
+          mode: "checkout",
+        };
+        p.settlingSince = undefined;
+        n.messages.push(
+          msg("square", "ESCALATE", `PayPal can't send a saved allowance straight to ${creditor.name}, and nothing was charged. ${debtor.name}, approve this one payment in PayPal and it goes directly to ${creditor.name}.`, {
+            amount: n.agreedAmount,
+            rule: "directPayment",
+          }),
+        );
+        return save(n);
       }
       p.orderId = order.orderId;
       p.captureId = order.captureId || order.orderId;

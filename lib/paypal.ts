@@ -114,7 +114,7 @@ export async function createPaymentToken(setupTokenId: string, fallbackEmail: st
 /* ---------- Settlement: charge the debtor's allowance, pay the friend ---------- */
 
 /** Test hooks for demo mode: script payout outcomes and count charges. */
-type DemoHooks = { charges: Map<string, string>; payoutOutcomes: string[]; payouts: Map<string, string>; failStatusLookups: number };
+type DemoHooks = { charges: Map<string, string>; payoutOutcomes: string[]; payouts: Map<string, string>; failStatusLookups: number; refuseDirectAllowance?: boolean };
 const g = globalThis as unknown as { __squareDemo?: DemoHooks };
 export function demoHooks(): DemoHooks {
   // SQUARE_DEMO_PAYOUTS=FAILED,SUCCESS scripts demo payout outcomes, to show failure handling without real money.
@@ -134,7 +134,8 @@ export function demoHooks(): DemoHooks {
 export const paymentRoute = (): "direct" | "payouts" => (process.env.SQUARE_PAYMENT === "payouts" ? "payouts" : "direct");
 
 /** PayPal refused to name this payee (account type, country or permissions), as opposed to a failed payment. */
-export const isPayeeRefusal = (e: unknown) => /PAYEE|payee|RECEIVER|receiver/.test((e as Error)?.message || "") && /\((400|403|422)\)/.test((e as Error)?.message || "");
+export const isPayeeRefusal = (e: unknown) =>
+  /PAYEE|payee|RECEIVER|receiver|Billing Agreement token/.test((e as Error)?.message || "") && /\((400|403|422)\)/.test((e as Error)?.message || "");
 
 const unit = (o: { reference: string; description: string; amount: number; payeeEmail?: string }) => ({
   reference_id: o.reference,
@@ -147,6 +148,8 @@ const unit = (o: { reference: string; description: string; amount: number; payee
 export async function chargeAllowance(opts: { vaultId: string; amount: number; description: string; reference: string; requestId: string; payeeEmail?: string }) {
   if (paypalMode() === "demo") {
     const h = demoHooks();
+    // The sandbox refuses to charge a saved allowance to someone other than the app's own account.
+    if (opts.payeeEmail && h.refuseDirectAllowance) throw new Error("PayPal POST /v2/checkout/orders failed (422): The requested Billing Agreement token was not found.");
     if (!h.charges.has(opts.requestId)) h.charges.set(opts.requestId, uid("DEMO-ORDER").toUpperCase());
     const orderId = h.charges.get(opts.requestId)!;
     return { orderId, status: "COMPLETED", captureId: orderId.replace("ORDER", "CAPTURE") };
